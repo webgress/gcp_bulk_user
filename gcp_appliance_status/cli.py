@@ -119,7 +119,10 @@ def _dedupe_project_ids(project_ids: list[str]) -> list[str]:
 
 
 def render_table(appliances: list[dict], tz: ZoneInfo) -> None:
-    console = Console()
+    # Rich may see wrapped terminals / app consoles as non-interactive and
+    # suppress OSC 8 hyperlinks. Force terminal rendering plus a concrete color
+    # system so Pantheon deep links remain clickable in supported terminals.
+    console = Console(force_terminal=True, color_system="standard")
     table = Table(title="Transfer Appliance Status", show_lines=True)
     table.add_column("Project", style="bold")
     table.add_column("Appliance ID")

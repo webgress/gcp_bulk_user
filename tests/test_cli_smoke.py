@@ -201,6 +201,29 @@ class CliSmokeTests(unittest.TestCase):
         self.assertIn("id[/link]", rendered)
         self.assertIn("ACTIVE[/gree", rendered)
 
+    def test_render_table_emits_pantheon_hyperlink(self) -> None:
+        appliances = [{
+            "project": "proj-123",
+            "appliance_id": "appliance-xyz",
+            "type": "TA40",
+            "state": "ACTIVE",
+            "create_time": "2026-04-01T10:00:00Z",
+            "update_time": "2026-04-10T12:00:00Z",
+            "location": "us-central1",
+        }]
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            cli.render_table(appliances, cli.ZoneInfo("UTC"))
+
+        rendered = stdout.getvalue()
+        self.assertIn("\x1b]8;", rendered)
+        self.assertIn(
+            "https://pantheon.corp.google.com/appliances/us-central1/"
+            "appliance-xyz;tab=configuration?project=proj-123",
+            rendered,
+        )
+
     def test_csv_formula_cells_are_prefixed(self) -> None:
         scan_results = ScanResults(
             appliances=[{
