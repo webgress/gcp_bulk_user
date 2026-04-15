@@ -400,6 +400,10 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
       color: var(--muted);
     }}
 
+    th button[data-active="true"] {{
+      color: var(--accent-strong);
+    }}
+
     tbody tr:hover {{
       background: rgba(255, 252, 245, 0.9);
     }}
@@ -526,12 +530,34 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
     let sortKey = "project";
     let sortDir = "asc";
 
-    const projects = Array.from(new Set(appliances.map((row) => row.project))).sort();
+    function countBy(key) {{
+      const counts = new Map();
+      for (const row of appliances) {{
+        counts.set(row[key], (counts.get(row[key]) || 0) + 1);
+      }}
+      return counts;
+    }}
+
+    const projectCounts = countBy("project");
+    const stateCounts = countBy("state");
+
+    const projects = Array.from(projectCounts.keys()).sort();
+    projectFilterEl.options[0].textContent = `All projects (${{appliances.length}})`;
     for (const project of projects) {{
       const option = document.createElement("option");
       option.value = project;
-      option.textContent = project;
+      option.textContent = `${{project}}: ${{projectCounts.get(project)}}`;
       projectFilterEl.appendChild(option);
+    }}
+
+    const states = Array.from(stateCounts.keys()).sort((a, b) => compareValues(a, b));
+    stateFilterEl.options[0].textContent = `All states (${{appliances.length}})`;
+    stateFilterEl.length = 1;
+    for (const state of states) {{
+      const option = document.createElement("option");
+      option.value = state;
+      option.textContent = `${{state}}: ${{stateCounts.get(state)}}`;
+      stateFilterEl.appendChild(option);
     }}
 
     function formatTime(value) {{
@@ -585,6 +611,7 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
       }}
 
       const cards = [
+        {{ label: "Total rows", value: appliances.length.toString() }},
         {{ label: "Visible rows", value: rows.length.toString() }},
         ...Array.from(counts.entries())
           .sort((a, b) => compareValues(a[0], b[0]))
@@ -635,10 +662,24 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
       }});
     }}
 
+    function updateSortButtons() {{
+      for (const button of sortButtons) {{
+        const active = button.dataset.sort === sortKey;
+        button.dataset.active = active ? "true" : "false";
+        const suffix = active ? (sortDir === "asc" ? " ↑" : " ↓") : " ↕";
+        button.textContent = `${{button.dataset.label}}${{suffix}}`;
+      }}
+    }}
+
     searchEl.addEventListener("input", renderRows);
     stateFilterEl.addEventListener("change", renderRows);
     projectFilterEl.addEventListener("change", renderRows);
 
+    for (const button of sortButtons) {{
+      button.dataset.label = button.textContent;
+    }}
+
+    updateSortButtons();
     renderRows();
   </script>
 </body>
