@@ -121,6 +121,10 @@ def get_appliances_for_project(project_id: str) -> ProjectScanResult:
     normalized = []
     row_errors = []
     for a in appliances or []:
+        if not isinstance(a, dict):
+            row_errors.append(f"non-object record: {type(a).__name__}")
+            continue
+
         full_name = a.get("name")
         if not isinstance(full_name, str) or not full_name:
             row_errors.append("record missing resource name")
@@ -136,10 +140,13 @@ def get_appliances_for_project(project_id: str) -> ProjectScanResult:
             "project": project_id,
             "name": full_name,
             "display_name": _sanitize_display_name(a.get("displayName", "")),
-            "state": a.get("state", a.get("status", "UNKNOWN")),
-            "model": a.get(
-                "model",
-                a.get("applianceModel", a.get("applianceType", a.get("type", "N/A"))),
+            "state": str(a.get("state") or a.get("status") or "UNKNOWN"),
+            "model": str(
+                a.get("model")
+                or a.get("applianceModel")
+                or a.get("applianceType")
+                or a.get("type")
+                or "N/A"
             ),
             "create_time": a.get("createTime", "N/A"),
             "update_time": a.get("updateTime", "N/A"),
@@ -160,16 +167,22 @@ def _parse_resource_name(name: str) -> tuple[str, str] | None:
     """Pull (location, appliance_id) out of projects/x/locations/L/appliances/Z.
 
     Returns None if the string doesn't match the expected resource shape.
+    Requires exactly 6 non-empty segments so subresource paths like
+    ``projects/P/locations/L/appliances/A/operations/op1`` and malformed
+    inputs with empty segments are rejected rather than silently mis-parsed.
     """
     parts = name.split("/")
     # Expected shape: ["projects", P, "locations", L, "appliances", Z]
     if (
-        len(parts) >= 6
+        len(parts) == 6
         and parts[0] == "projects"
         and parts[2] == "locations"
         and parts[4] == "appliances"
+        and parts[1]
+        and parts[3]
+        and parts[5]
     ):
-        return parts[3], parts[-1]
+        return parts[3], parts[5]
     return None
 
 

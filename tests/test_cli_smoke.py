@@ -287,6 +287,69 @@ class ApplianceHelpersTests(unittest.TestCase):
             _parse_resource_name("projects/p1/locations/us-central1/orders/order-123")
         )
 
+    def test_subresource_resource_name_is_rejected(self) -> None:
+        # If the API ever returns a child resource like an operation, we
+        # must not silently treat the trailing segment as an appliance ID.
+        self.assertIsNone(
+            _parse_resource_name(
+                "projects/p1/locations/L/appliances/A/operations/op1"
+            )
+        )
+
+    def test_empty_segments_in_resource_name_are_rejected(self) -> None:
+        for bad in [
+            "projects/p1/locations/L/appliances/",
+            "projects/p1/locations//appliances/A",
+            "projects/p1/locations/L/appliances/A/",
+            "projects//locations/L/appliances/A",
+        ]:
+            with self.subTest(name=bad):
+                self.assertIsNone(_parse_resource_name(bad))
+
+    def test_non_dict_records_are_skipped_not_crashing(self) -> None:
+        # A malformed API payload that includes a non-dict entry must not
+        # crash the whole per-project scan; it should be reported as a
+        # skipped record and valid entries should still flow through.
+        with patch(
+            "gcp_appliance_status.appliances._get_appliances_via_api",
+            return_value=(
+                [
+                    "not-a-dict",
+                    {
+                        "name": "projects/p1/locations/us-central1/appliances/a1",
+                        "applianceType": "TA40",
+                    },
+                ],
+                None,
+            ),
+        ):
+            result = get_appliances_for_project("p1")
+
+        self.assertEqual(len(result.appliances), 1)
+        self.assertEqual(result.appliances[0]["appliance_id"], "a1")
+        self.assertIn("non-object record", result.error or "")
+
+    def test_null_state_is_coerced_to_string(self) -> None:
+        # The API occasionally returns null fields; downstream code
+        # (notably --state-filter) calls .upper(), which would crash on None.
+        with patch(
+            "gcp_appliance_status.appliances._get_appliances_via_api",
+            return_value=(
+                [{
+                    "name": "projects/p1/locations/L/appliances/a1",
+                    "state": None,
+                    "applianceType": None,
+                }],
+                None,
+            ),
+        ):
+            result = get_appliances_for_project("p1")
+
+        self.assertEqual(result.appliances[0]["state"], "UNKNOWN")
+        self.assertEqual(result.appliances[0]["model"], "N/A")
+        # Must be safe to uppercase — this is what --state-filter does.
+        result.appliances[0]["state"].upper()
+
     def test_malformed_resource_name_is_reported(self) -> None:
         with patch(
             "gcp_appliance_status.appliances._get_appliances_via_api",
