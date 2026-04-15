@@ -20,9 +20,10 @@ TA_BASE_URL = "https://transferappliance.googleapis.com/v1alpha1"
 def _get_appliances_via_api(project_id: str) -> list[dict] | None:
     """Fetch appliance orders from the v1alpha1 REST endpoint directly.
 
-    Returns a list (possibly empty) on a successful API call, or None when the
-    call itself failed — so callers can distinguish "API said zero orders"
-    from "API call failed, try the fallback".
+    Returns a list (possibly empty) on any completed HTTP exchange — a 4xx/5xx
+    is authoritative (gcloud hits the same endpoint, it will not do better).
+    Returns None only when we never got a response at all (transport error,
+    DNS, timeout), which is the one case where the gcloud fallback can help.
     """
     credentials, quota_project = google.auth.default(
         scopes=["https://www.googleapis.com/auth/cloud-platform"]
@@ -45,7 +46,7 @@ def _get_appliances_via_api(project_id: str) -> list[dict] | None:
 
     body = response.text[:200].replace("\n", " ")
     print(f"[api] {project_id}: HTTP {response.status_code} {body}", file=sys.stderr)
-    return None
+    return []
 
 
 def _get_appliances_via_gcloud(project_id: str) -> list[dict]:
