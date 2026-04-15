@@ -150,7 +150,7 @@ The `Project` and `Appliance ID` columns are clickable deep links in terminals t
 
 ```
 ┌─────────────┬───────────────┬───────┬────────────┬─────────────┬─────────────┐
-│ Project     │ Appliance ID  │ Type  │ State      │ Created     │ Updated     │
+│ Project     │ Appliance ID  │ Model │ State      │ Created     │ Updated     │
 ├─────────────┼───────────────┼───────┼────────────┼─────────────┼─────────────┤
 │ proj-alpha  │ app-001       │ TA40  │ PREPARING  │ 2026-01-15  │ 2026-03-20  │
 │ proj-beta   │ app-042       │ TA300 │ ON_SITE    │ 2026-02-01  │ 2026-03-24  │

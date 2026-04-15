@@ -126,7 +126,7 @@ def render_table(appliances: list[dict], tz: ZoneInfo) -> None:
     table = Table(title="Transfer Appliance Status", show_lines=True)
     table.add_column("Project", style="bold")
     table.add_column("Appliance ID")
-    table.add_column("Type")
+    table.add_column("Model")
     table.add_column("State")
     table.add_column("Created")
     table.add_column("Updated")
@@ -147,7 +147,7 @@ def render_table(appliances: list[dict], tz: ZoneInfo) -> None:
         table.add_row(
             project_text,
             appliance_text,
-            str(a["type"]),
+            str(a["model"]),
             state_text,
             _format_ts(a["create_time"], tz),
             _format_ts(a["update_time"], tz),
@@ -161,7 +161,7 @@ def render_csv(appliances: list[dict]) -> None:
     writer.writerow([
         "project",
         "appliance_id",
-        "type",
+        "model",
         "state",
         "create_time",
         "update_time",
@@ -170,7 +170,7 @@ def render_csv(appliances: list[dict]) -> None:
         writer.writerow([
             _safe_csv_cell(a["project"]),
             _safe_csv_cell(a["appliance_id"]),
-            _safe_csv_cell(a["type"]),
+            _safe_csv_cell(a["model"]),
             _safe_csv_cell(a["state"]),
             _safe_csv_cell(a["create_time"]),
             _safe_csv_cell(a["update_time"]),

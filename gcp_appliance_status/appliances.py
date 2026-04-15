@@ -137,7 +137,10 @@ def get_appliances_for_project(project_id: str) -> ProjectScanResult:
             "name": full_name,
             "display_name": _sanitize_display_name(a.get("displayName", "")),
             "state": a.get("state", a.get("status", "UNKNOWN")),
-            "type": a.get("applianceType", a.get("type", "N/A")),
+            "model": a.get(
+                "model",
+                a.get("applianceModel", a.get("applianceType", a.get("type", "N/A"))),
+            ),
             "create_time": a.get("createTime", "N/A"),
             "update_time": a.get("updateTime", "N/A"),
             "appliance_id": appliance_id,

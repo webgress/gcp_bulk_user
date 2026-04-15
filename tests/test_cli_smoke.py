@@ -52,7 +52,7 @@ class CliSmokeTests(unittest.TestCase):
                 "project": "p1",
                 "name": "projects/p1/locations/us-central1/appliances/appliance-123",
                 "state": "ACTIVE",
-                "type": "TA40",
+                "model": "TA40",
                 "create_time": "2026-04-01T10:00:00Z",
                 "update_time": "2026-04-10T12:00:00Z",
                 "appliance_id": "appliance-123",
@@ -74,7 +74,7 @@ class CliSmokeTests(unittest.TestCase):
                 "project": "p1",
                 "name": "n",
                 "state": "active",
-                "type": "TA40",
+                "model": "TA40",
                 "create_time": "t",
                 "update_time": "t",
                 "appliance_id": "a1",
@@ -99,7 +99,7 @@ class CliSmokeTests(unittest.TestCase):
                 "project": "p1",
                 "name": "n",
                 "state": "ACTIVE",
-                "type": "TA40",
+                "model": "TA40",
                 "create_time": "t1",
                 "update_time": "t2",
                 "appliance_id": "a1",
@@ -111,7 +111,7 @@ class CliSmokeTests(unittest.TestCase):
         code, out, _ = run_cli(["--org-id", "999", "--format", "csv"], scan_results)
 
         self.assertEqual(code, 0)
-        self.assertIn("project,appliance_id,type,state,create_time,update_time", out)
+        self.assertIn("project,appliance_id,model,state,create_time,update_time", out)
         self.assertIn("p1,a1,TA40,ACTIVE,t1,t2", out)
 
     def test_partial_scan_returns_results_and_nonzero_exit(self) -> None:
@@ -120,7 +120,7 @@ class CliSmokeTests(unittest.TestCase):
                 "project": "p1",
                 "name": "n",
                 "state": "ACTIVE",
-                "type": "TA40",
+                "model": "TA40",
                 "create_time": "t1",
                 "update_time": "t2",
                 "appliance_id": "a1",
@@ -186,7 +186,7 @@ class CliSmokeTests(unittest.TestCase):
         appliances = [{
             "project": "proj",
             "appliance_id": "id[/link][red]PWN[/red]",
-            "type": "TA40",
+            "model": "TA40",
             "state": "ACTIVE[/green][link=https://evil]",
             "create_time": "2026-04-01T10:00:00Z",
             "update_time": "2026-04-10T12:00:00Z",
@@ -199,13 +199,13 @@ class CliSmokeTests(unittest.TestCase):
 
         rendered = stdout.getvalue()
         self.assertIn("id[/link]", rendered)
-        self.assertIn("ACTIVE[/gree", rendered)
+        self.assertIn("ACTIVE[/gre", rendered)
 
     def test_render_table_emits_pantheon_hyperlink(self) -> None:
         appliances = [{
             "project": "proj-123",
             "appliance_id": "appliance-xyz",
-            "type": "TA40",
+            "model": "TA40",
             "state": "ACTIVE",
             "create_time": "2026-04-01T10:00:00Z",
             "update_time": "2026-04-10T12:00:00Z",
@@ -230,7 +230,7 @@ class CliSmokeTests(unittest.TestCase):
                 "project": "p1",
                 "name": "n",
                 "state": "ACTIVE",
-                "type": "TA40",
+                "model": "TA40",
                 "create_time": "2026-01-01",
                 "update_time": "2026-01-02",
                 "appliance_id": '=HYPERLINK("http://evil")',
@@ -280,6 +280,7 @@ class ApplianceHelpersTests(unittest.TestCase):
         self.assertIsNone(result.error)
         self.assertEqual(len(result.appliances), 1)
         self.assertEqual(result.appliances[0]["appliance_id"], "appliance-123")
+        self.assertEqual(result.appliances[0]["model"], "TA40")
 
     def test_order_resource_name_does_not_look_like_appliance(self) -> None:
         self.assertIsNone(
