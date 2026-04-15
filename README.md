@@ -127,16 +127,16 @@ python -m gcp_appliance_status --org-id 123456789 --workers 20
 
 ### Table (default)
 
-Color-coded terminal table using `rich`:
+Plain columnar output, no colors or box drawing:
 
 ```
-┌─────────────┬───────────┬──────┬──────────┬─────────────┬─────────────┐
-│ Project     │ Order ID  │ Type │ State    │ Created     │ Updated     │
-├─────────────┼───────────┼──────┼──────────┼─────────────┼─────────────┤
-│ proj-alpha  │ order-001 │ TA40 │ SHIPPING │ 2026-01-15  │ 2026-03-20  │
-│ proj-beta   │ order-042 │ TA300│ ACTIVE   │ 2026-02-01  │ 2026-03-24  │
-└─────────────┴───────────┴──────┴──────────┴─────────────┴─────────────┘
+Project     Appliance ID  Type   State     Created     Updated
+----------  ------------  -----  --------  ----------  ----------
+proj-alpha  app-001       TA40   SHIPPING  2026-01-15  2026-03-20
+proj-beta   app-042       TA300  ACTIVE    2026-02-01  2026-03-24
 ```
+
+Progress messages ("Discovering projects...", "Found N project(s).") go to stderr so they don't contaminate piped output.
 
 ### JSON
 

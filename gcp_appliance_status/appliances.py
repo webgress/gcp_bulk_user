@@ -34,7 +34,7 @@ def _get_appliances_via_api(project_id: str) -> list[dict] | None:
     if quota_project:
         headers["X-Goog-User-Project"] = quota_project
 
-    url = f"{TA_BASE_URL}/projects/{project_id}/locations/-/orders"
+    url = f"{TA_BASE_URL}/projects/{project_id}/locations/-/appliances"
     try:
         response = session.get(url, headers=headers, timeout=30)
     except Exception as e:
@@ -42,7 +42,7 @@ def _get_appliances_via_api(project_id: str) -> list[dict] | None:
         return None
 
     if response.status_code == 200:
-        return response.json().get("orders", [])
+        return response.json().get("appliances", [])
 
     body = response.text[:200].replace("\n", " ")
     print(f"[api] {project_id}: HTTP {response.status_code} {body}", file=sys.stderr)
@@ -90,13 +90,13 @@ def get_appliances_for_project(project_id: str) -> list[dict]:
             "type": a.get("applianceType", a.get("type", "N/A")),
             "create_time": a.get("createTime", "N/A"),
             "update_time": a.get("updateTime", "N/A"),
-            "order_id": _extract_order_id(a.get("name", "")),
+            "appliance_id": _extract_resource_id(a.get("name", "")),
         })
     return normalized
 
 
-def _extract_order_id(name: str) -> str:
-    """Extract order ID from resource name like projects/x/locations/y/orders/z."""
+def _extract_resource_id(name: str) -> str:
+    """Extract the trailing ID from a resource name like projects/x/locations/y/appliances/z."""
     parts = name.split("/")
     return parts[-1] if parts else name
 

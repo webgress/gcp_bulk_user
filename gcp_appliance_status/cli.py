@@ -4,25 +4,8 @@ import argparse
 import json
 import sys
 
-from rich.console import Console
-from rich.table import Table
-
 from .appliances import get_all_appliances
 from .projects import list_org_projects
-
-STATE_COLORS = {
-    "ACTIVE": "green",
-    "PREPARING": "yellow",
-    "SHIPPING": "cyan",
-    "IN_TRANSIT": "cyan",
-    "DELIVERED": "blue",
-    "DATA_UPLOAD": "magenta",
-    "PROCESSING": "magenta",
-    "COMPLETED": "green",
-    "CANCELLED": "red",
-    "FAILED": "red",
-    "UNKNOWN": "dim",
-}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,57 +36,51 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def render_table(appliances: list[dict], console: Console) -> None:
-    table = Table(title="Transfer Appliance Status", show_lines=True)
-    table.add_column("Project", style="bold")
-    table.add_column("Order ID")
-    table.add_column("Type")
-    table.add_column("State")
-    table.add_column("Created")
-    table.add_column("Updated")
-
-    for a in appliances:
-        state = a["state"]
-        color = STATE_COLORS.get(state, "white")
-        table.add_row(
-            a["project"],
-            a["order_id"],
-            a["type"],
-            f"[{color}]{state}[/{color}]",
-            a["create_time"],
-            a["update_time"],
-        )
-
-    console.print(table)
+def render_table(appliances: list[dict]) -> None:
+    headers = ["Project", "Appliance ID", "Type", "State", "Created", "Updated"]
+    rows = [
+        [a["project"], a["appliance_id"], a["type"], a["state"],
+         a["create_time"], a["update_time"]]
+        for a in appliances
+    ]
+    widths = [max(len(str(r[i])) for r in ([headers] + rows)) for i in range(len(headers))]
+    sep = "  "
+    print(sep.join(h.ljust(widths[i]) for i, h in enumerate(headers)))
+    print(sep.join("-" * widths[i] for i in range(len(headers))))
+    for r in rows:
+        print(sep.join(str(r[i]).ljust(widths[i]) for i in range(len(headers))))
 
 
 def render_csv(appliances: list[dict]) -> None:
-    print("project,order_id,type,state,create_time,update_time")
+    print("project,appliance_id,type,state,create_time,update_time")
     for a in appliances:
-        print(f'{a["project"]},{a["order_id"]},{a["type"]},{a["state"]},'
+        print(f'{a["project"]},{a["appliance_id"]},{a["type"]},{a["state"]},'
               f'{a["create_time"]},{a["update_time"]}')
+
+
+def _log(msg: str) -> None:
+    print(msg, file=sys.stderr)
 
 
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    console = Console(stderr=True)
 
     # Discover projects
     if args.projects:
         project_ids = args.projects
-        console.print(f"Using {len(project_ids)} specified project(s).")
+        _log(f"Using {len(project_ids)} specified project(s).")
     else:
-        console.print(f"Discovering projects in org {args.org_id}...")
+        _log(f"Discovering projects in org {args.org_id}...")
         projects = list_org_projects(args.org_id)
         if not projects:
-            console.print("[red]No projects found in organization.[/red]")
+            _log("No projects found in organization.")
             sys.exit(1)
         project_ids = [p["project_id"] for p in projects]
-        console.print(f"Found {len(project_ids)} project(s).")
+        _log(f"Found {len(project_ids)} project(s).")
 
     # Fetch appliance statuses
-    console.print("Querying Transfer Appliance status...")
+    _log("Querying Transfer Appliance status...")
     appliances = get_all_appliances(project_ids, max_workers=args.workers)
 
     # Apply state filter
@@ -112,10 +89,10 @@ def main() -> None:
         appliances = [a for a in appliances if a["state"] in filter_states]
 
     if not appliances:
-        console.print("[yellow]No Transfer Appliances found across scanned projects.[/yellow]")
+        _log("No Transfer Appliances found across scanned projects.")
         sys.exit(0)
 
-    console.print(f"Found {len(appliances)} appliance(s).\n")
+    _log(f"Found {len(appliances)} appliance(s).\n")
 
     # Output
     if args.output_format == "json":
@@ -123,8 +100,7 @@ def main() -> None:
     elif args.output_format == "csv":
         render_csv(appliances)
     else:
-        output_console = Console()
-        render_table(appliances, output_console)
+        render_table(appliances)
 
 
 if __name__ == "__main__":
