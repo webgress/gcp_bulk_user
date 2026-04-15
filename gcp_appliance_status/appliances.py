@@ -1,8 +1,10 @@
 """Fetch Transfer Appliance status across GCP projects.
 
-Uses the Transfer Appliance API via google-api-python-client discovery,
+Uses the Transfer Appliance v1alpha1 REST API directly (no discovery doc),
 with a fallback to gcloud CLI subprocess calls.
 """
+
+from __future__ import annotations
 
 import json
 import subprocess
@@ -10,33 +12,40 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import google.auth
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+from google.auth.transport.requests import AuthorizedSession
+
+TA_BASE_URL = "https://transferappliance.googleapis.com/v1alpha1"
 
 
-def _get_appliances_via_api(project_id: str) -> list[dict]:
-    """Try fetching appliances using the discovery API."""
-    credentials, _ = google.auth.default(
+def _get_appliances_via_api(project_id: str) -> list[dict] | None:
+    """Fetch appliance orders from the v1alpha1 REST endpoint directly.
+
+    Returns a list (possibly empty) on a successful API call, or None when the
+    call itself failed — so callers can distinguish "API said zero orders"
+    from "API call failed, try the fallback".
+    """
+    credentials, quota_project = google.auth.default(
         scopes=["https://www.googleapis.com/auth/cloud-platform"]
     )
+    session = AuthorizedSession(credentials)
+    headers = {}
+    # User creds need X-Goog-User-Project to identify the billing project.
+    if quota_project:
+        headers["X-Goog-User-Project"] = quota_project
+
+    url = f"{TA_BASE_URL}/projects/{project_id}/locations/-/orders"
     try:
-        service = build(
-            "transferappliance", "v1",
-            credentials=credentials,
-            static_discovery=False,
-        )
-        # List appliance orders for the project
-        request = service.projects().locations().orders().list(
-            parent=f"projects/{project_id}/locations/-"
-        )
-        response = request.execute()
-        return response.get("orders", [])
-    except HttpError as e:
-        if e.resp.status in (403, 404):
-            return []
-        raise
-    except Exception:
-        return []
+        response = session.get(url, headers=headers, timeout=30)
+    except Exception as e:
+        print(f"[api] {project_id}: {type(e).__name__}: {e}", file=sys.stderr)
+        return None
+
+    if response.status_code == 200:
+        return response.json().get("orders", [])
+
+    body = response.text[:200].replace("\n", " ")
+    print(f"[api] {project_id}: HTTP {response.status_code} {body}", file=sys.stderr)
+    return None
 
 
 def _get_appliances_via_gcloud(project_id: str) -> list[dict]:
@@ -51,18 +60,23 @@ def _get_appliances_via_gcloud(project_id: str) -> list[dict]:
         )
         if result.returncode == 0 and result.stdout.strip():
             return json.loads(result.stdout)
-    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
-        pass
+        if result.returncode != 0:
+            print(f"[gcloud] {project_id}: rc={result.returncode} {result.stderr.strip()}",
+                  file=sys.stderr)
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"[gcloud] {project_id}: {type(e).__name__}: {e}", file=sys.stderr)
     return []
 
 
 def get_appliances_for_project(project_id: str) -> list[dict]:
     """Get Transfer Appliance orders for a single project.
 
-    Tries the discovery API first, falls back to gcloud CLI.
+    Tries the v1alpha1 REST API first. Only falls back to the gcloud CLI when
+    the API call itself failed (returned None) — a successful empty response
+    is treated as an authoritative "no appliances" and short-circuits.
     """
     appliances = _get_appliances_via_api(project_id)
-    if not appliances:
+    if appliances is None:
         appliances = _get_appliances_via_gcloud(project_id)
 
     # Normalize each record

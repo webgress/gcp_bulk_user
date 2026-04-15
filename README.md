@@ -24,11 +24,17 @@ The tool uses [Application Default Credentials (ADC)](https://cloud.google.com/d
 
 ### Option A: User credentials (interactive / local development)
 
-```bash
-gcloud auth application-default login
-```
+1. Log in and write ADC to disk:
+   ```bash
+   gcloud auth application-default login
+   ```
+   The command opens a browser for OAuth consent and writes credentials to `~/.config/gcloud/application_default_credentials.json`. No token is printed to the terminal — the Python client picks it up from disk automatically.
 
-This opens a browser for OAuth consent. The resulting credentials are stored at `~/.config/gcloud/application_default_credentials.json` and are picked up automatically.
+2. **Attach a quota/billing project to ADC.** User credentials have no billing association on their own, and most Google APIs (including Transfer Appliance and Resource Manager) will reject the call with `HTTP 403 "Method doesn't allow unregistered callers"` until you set one:
+   ```bash
+   gcloud auth application-default set-quota-project YOUR_QUOTA_PROJECT
+   ```
+   Any project you own and that has billing enabled works. The tool sends this as the `X-Goog-User-Project` header on every request. Service-account auth (Option B / C) does not need this step.
 
 ### Option B: Service account key (CI / automation)
 
@@ -79,6 +85,21 @@ gcloud organizations add-iam-policy-binding $ORG_ID \
 ```
 
 If `roles/transferappliance.viewer` is not available in your environment (the API is still alpha), use the broader `roles/viewer` on each project or rely on the `gcloud alpha` fallback path, which uses your `gcloud auth login` session.
+
+## Required API Enablement
+
+Even with correct credentials and IAM, the underlying APIs must be enabled on the project that you point ADC's quota project at, plus on each project you intend to scan:
+
+```bash
+# On the quota project attached to ADC:
+gcloud services enable cloudresourcemanager.googleapis.com --project=YOUR_QUOTA_PROJECT
+
+# On every project you want to scan (enabling the API is free — you only pay
+# when an appliance is ordered):
+gcloud services enable transferappliance.googleapis.com --project=PROJECT_ID
+```
+
+If a scanned project doesn't have `transferappliance.googleapis.com` enabled, it will surface as `HTTP 403 SERVICE_DISABLED` on stderr and be skipped.
 
 ## Usage
 
@@ -132,8 +153,10 @@ python -m gcp_appliance_status --org-id 123456789 --format csv > report.csv
 ## How It Works
 
 1. **Project discovery** — queries the Cloud Resource Manager API to list all active projects under the given org ID.
-2. **Appliance status** — for each project, queries the `transferappliance.googleapis.com` discovery API. If that fails (API not enabled, permissions, etc.), falls back to `gcloud alpha transfer appliances orders list`.
+2. **Appliance status** — for each project, calls the Transfer Appliance `v1alpha1` REST endpoint directly (`https://transferappliance.googleapis.com/v1alpha1/projects/{project}/locations/-/orders`) using `AuthorizedSession` from `google-auth`, with `X-Goog-User-Project` set from the ADC quota project. If that fails, falls back to `gcloud alpha transfer appliances orders list`.
 3. **Aggregation** — results from all projects are merged and displayed in the chosen format.
+
+> The tool does **not** use `googleapiclient.discovery.build(...)` because Transfer Appliance does not publish a public discovery document at a stable path. Calling the REST URL directly is the supported approach while the API remains `v1alpha1`.
 
 ## Troubleshooting
 
