@@ -119,6 +119,13 @@ python -m gcp_appliance_status --org-id 123456789 --format json
 # Output as CSV (for spreadsheets)
 python -m gcp_appliance_status --org-id 123456789 --format csv > appliances.csv
 
+# Output as interactive HTML report to a specific file
+python -m gcp_appliance_status --org-id 123456789 --format html --html-file appliances.html
+
+# In an interactive terminal, omit --html-file to write /tmp/report_<timestamp>.html
+# and open it automatically in your default browser.
+python -m gcp_appliance_status --org-id 123456789 --format html
+
 # Control parallelism (default: 10 threads)
 python -m gcp_appliance_status --org-id 123456789 --workers 20
 
@@ -165,11 +172,29 @@ Progress messages ("Discovering projects...", "Found N project(s).") go to stder
 python -m gcp_appliance_status --org-id 123456789 --format json | jq '.[] | .state'
 ```
 
+JSON rows include `project_url` and `appliance_url` fields by default so downstream tools can open Pantheon directly.
+
 ### CSV
 
 ```bash
 python -m gcp_appliance_status --org-id 123456789 --format csv > report.csv
 ```
+
+CSV output includes `project_url` and `appliance_url` columns by default.
+
+### HTML
+
+```bash
+python -m gcp_appliance_status --org-id 123456789 --format html --html-file report.html
+```
+
+The HTML report embeds the same row JSON used by the JSON output and renders a client-side interactive page with:
+
+- clickable Pantheon links for `Project` and `Appliance ID`
+- search, state/project filters, and sortable columns
+- summary counts for the currently visible rows
+
+When you run `--format html` in an interactive terminal without `--html-file`, the tool writes `/tmp/report_<timestamp>.html` and opens it automatically on macOS with `open`.
 
 ## How It Works
 

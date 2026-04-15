@@ -5,8 +5,10 @@ from __future__ import annotations
 import io
 import json
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest.mock import patch
 
 from gcp_appliance_status import cli
@@ -67,6 +69,15 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(parsed[0]["appliance_id"], "appliance-123")
         self.assertEqual(parsed[0]["state"], "ACTIVE")
+        self.assertEqual(
+            parsed[0]["project_url"],
+            "https://pantheon.corp.google.com/home/dashboard?project=p1",
+        )
+        self.assertEqual(
+            parsed[0]["appliance_url"],
+            "https://pantheon.corp.google.com/appliances/us-central1/"
+            "appliance-123;tab=configuration?project=p1",
+        )
 
     def test_state_filter_is_case_insensitive(self) -> None:
         scan_results = ScanResults(
@@ -111,8 +122,16 @@ class CliSmokeTests(unittest.TestCase):
         code, out, _ = run_cli(["--org-id", "999", "--format", "csv"], scan_results)
 
         self.assertEqual(code, 0)
-        self.assertIn("project,appliance_id,model,state,create_time,update_time", out)
-        self.assertIn("p1,a1,TA40,ACTIVE,t1,t2", out)
+        self.assertIn(
+            "project,project_url,appliance_id,appliance_url,model,state,create_time,update_time",
+            out,
+        )
+        self.assertIn("https://pantheon.corp.google.com/home/dashboard?project=p1", out)
+        self.assertIn(
+            "https://pantheon.corp.google.com/home/dashboard?project=p1,"
+            "a1,https://pantheon.corp.google.com/home/dashboard?project=p1,TA40,ACTIVE,t1,t2",
+            out,
+        )
 
     def test_partial_scan_returns_results_and_nonzero_exit(self) -> None:
         scan_results = ScanResults(
@@ -243,6 +262,109 @@ class CliSmokeTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertIn('"\'=HYPERLINK(""http://evil"")"', out)
+
+    def test_html_output_embeds_same_json_and_links(self) -> None:
+        scan_results = ScanResults(
+            appliances=[{
+                "project": "p1",
+                "name": "projects/p1/locations/us-central1/appliances/appliance-123",
+                "state": "ACTIVE",
+                "model": "TA40",
+                "create_time": "2026-04-01T10:00:00Z",
+                "update_time": "2026-04-10T12:00:00Z",
+                "appliance_id": "appliance-123",
+                "location": "us-central1",
+            }],
+            errors=[],
+        )
+
+        code, out, _ = run_cli(["--org-id", "999", "--format", "html"], scan_results)
+
+        self.assertEqual(code, 0)
+        self.assertIn('<script id="report-data" type="application/json">', out)
+        self.assertIn('"project_url": "https://pantheon.corp.google.com/home/dashboard?project=p1"', out)
+        self.assertIn(
+            '"appliance_url": "https://pantheon.corp.google.com/appliances/us-central1/'
+            'appliance-123;tab=configuration?project=p1"',
+            out,
+        )
+        self.assertIn('<button data-sort="model">Model</button>', out)
+
+    def test_html_file_writes_report(self) -> None:
+        scan_results = ScanResults(
+            appliances=[{
+                "project": "p1",
+                "name": "projects/p1/locations/us-central1/appliances/appliance-123",
+                "state": "ACTIVE",
+                "model": "TA40",
+                "create_time": "2026-04-01T10:00:00Z",
+                "update_time": "2026-04-10T12:00:00Z",
+                "appliance_id": "appliance-123",
+                "location": "us-central1",
+            }],
+            errors=[],
+        )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            report_path = Path(tempdir) / "report.html"
+            code, out, err = run_cli(
+                ["--org-id", "999", "--format", "html", "--html-file", str(report_path)],
+                scan_results,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(out, "")
+            self.assertIn(f"Wrote HTML report to {report_path}", err)
+            content = report_path.read_text(encoding="utf-8")
+            self.assertIn("Transfer Appliance Status - org 999", content)
+            self.assertIn('"project_url": "https://pantheon.corp.google.com/home/dashboard?project=p1"', content)
+
+    def test_html_without_file_writes_tmp_and_opens_when_interactive(self) -> None:
+        class TtyStringIO(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        scan_results = ScanResults(
+            appliances=[{
+                "project": "p1",
+                "name": "projects/p1/locations/us-central1/appliances/appliance-123",
+                "state": "ACTIVE",
+                "model": "TA40",
+                "create_time": "2026-04-01T10:00:00Z",
+                "update_time": "2026-04-10T12:00:00Z",
+                "appliance_id": "appliance-123",
+                "location": "us-central1",
+            }],
+            errors=[],
+        )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            report_path = Path(tempdir) / "report.html"
+            stdout = TtyStringIO()
+            stderr = io.StringIO()
+            with patch(
+                "gcp_appliance_status.cli.list_org_projects",
+                return_value=[{"project_id": "p1", "name": "P1", "state": "ACTIVE"}],
+            ), patch(
+                "gcp_appliance_status.cli.get_all_appliances",
+                return_value=scan_results,
+            ), patch(
+                "gcp_appliance_status.cli._default_html_report_path",
+                return_value=report_path,
+            ), patch(
+                "gcp_appliance_status.cli.subprocess.run",
+                return_value=cli.subprocess.CompletedProcess(["open", str(report_path)], 0),
+            ) as mocked_open, patch.object(
+                sys,
+                "argv",
+                ["gcp_appliance_status", "--org-id", "999", "--format", "html"],
+            ), patch.object(sys, "stdout", stdout), patch.object(sys, "stderr", stderr):
+                cli.main()
+
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertIn(f"Wrote HTML report to {report_path}", stderr.getvalue())
+            mocked_open.assert_called_once_with(["open", str(report_path)], check=False)
+            self.assertTrue(report_path.exists())
 
 
 class ApplianceHelpersTests(unittest.TestCase):
