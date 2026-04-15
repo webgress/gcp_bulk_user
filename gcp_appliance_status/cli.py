@@ -1,13 +1,16 @@
 """CLI entry point for GCP Transfer Appliance status viewer."""
 
 import argparse
+import csv
 import json
 import sys
 from datetime import datetime
+from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from .appliances import get_all_appliances
 from .projects import list_org_projects
@@ -21,13 +24,16 @@ def _appliance_url(project: str, location: str, appliance_id: str) -> str:
     # Pantheon appliance detail page. Falls back to the project home if we
     # couldn't parse a location out of the resource name.
     if not location:
-        return f"{PANTHEON_BASE}/home/dashboard?project={project}"
-    return (f"{PANTHEON_BASE}/appliances/{location}/{appliance_id}"
-            f";tab=configuration?project={project}")
+        return _project_url(project)
+    query = urlencode({"project": project})
+    safe_location = quote(location, safe="")
+    safe_appliance_id = quote(appliance_id, safe="")
+    return (f"{PANTHEON_BASE}/appliances/{safe_location}/{safe_appliance_id}"
+            f";tab=configuration?{query}")
 
 
 def _project_url(project: str) -> str:
-    return f"{PANTHEON_BASE}/home/dashboard?project={project}"
+    return f"{PANTHEON_BASE}/home/dashboard?{urlencode({'project': project})}"
 
 # Appliance state colors (keys are compared case-insensitively).
 # Real v1alpha1 states seen so far: DRAFT, REQUESTED, PREPARING,
@@ -62,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output format (default: table).",
     )
     parser.add_argument(
-        "--workers", type=int, default=10,
+        "--workers", type=_positive_int, default=10,
         help="Max parallel workers for API calls (default: 10).",
     )
     parser.add_argument(
@@ -75,6 +81,16 @@ def build_parser() -> argparse.ArgumentParser:
              "JSON/CSV output keeps raw ISO-8601 from the API.",
     )
     return parser
+
+
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return parsed
 
 
 def _format_ts(iso_str: str, tz: ZoneInfo) -> str:
@@ -91,6 +107,17 @@ def _format_ts(iso_str: str, tz: ZoneInfo) -> str:
     return dt.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
 
 
+def _safe_csv_cell(value: object) -> str:
+    text = str(value)
+    if text[:1] in {"=", "+", "-", "@", "\t", "\r"}:
+        return f"'{text}"
+    return text
+
+
+def _dedupe_project_ids(project_ids: list[str]) -> list[str]:
+    return list(dict.fromkeys(project_ids))
+
+
 def render_table(appliances: list[dict], tz: ZoneInfo) -> None:
     console = Console()
     table = Table(title="Transfer Appliance Status", show_lines=True)
@@ -102,16 +129,23 @@ def render_table(appliances: list[dict], tz: ZoneInfo) -> None:
     table.add_column("Updated")
 
     for a in appliances:
-        state = a["state"]
+        state = str(a["state"])
         color = STATE_COLORS.get(state.upper(), "white")
-        proj_link = _project_url(a["project"])
-        app_link = _appliance_url(a["project"], a.get("location", ""),
-                                  a["appliance_id"])
+        project = str(a["project"])
+        appliance_id = str(a["appliance_id"])
+        proj_link = _project_url(project)
+        app_link = _appliance_url(project, str(a.get("location", "")),
+                                  appliance_id)
+        project_text = Text(project, style="bold")
+        project_text.stylize(f"link {proj_link}")
+        appliance_text = Text(appliance_id)
+        appliance_text.stylize(f"link {app_link}")
+        state_text = Text(state, style=color)
         table.add_row(
-            f"[link={proj_link}]{a['project']}[/link]",
-            f"[link={app_link}]{a['appliance_id']}[/link]",
-            a["type"],
-            f"[{color}]{state}[/{color}]",
+            project_text,
+            appliance_text,
+            str(a["type"]),
+            state_text,
             _format_ts(a["create_time"], tz),
             _format_ts(a["update_time"], tz),
         )
@@ -120,10 +154,24 @@ def render_table(appliances: list[dict], tz: ZoneInfo) -> None:
 
 
 def render_csv(appliances: list[dict]) -> None:
-    print("project,appliance_id,type,state,create_time,update_time")
+    writer = csv.writer(sys.stdout)
+    writer.writerow([
+        "project",
+        "appliance_id",
+        "type",
+        "state",
+        "create_time",
+        "update_time",
+    ])
     for a in appliances:
-        print(f'{a["project"]},{a["appliance_id"]},{a["type"]},{a["state"]},'
-              f'{a["create_time"]},{a["update_time"]}')
+        writer.writerow([
+            _safe_csv_cell(a["project"]),
+            _safe_csv_cell(a["appliance_id"]),
+            _safe_csv_cell(a["type"]),
+            _safe_csv_cell(a["state"]),
+            _safe_csv_cell(a["create_time"]),
+            _safe_csv_cell(a["update_time"]),
+        ])
 
 
 def _log(msg: str) -> None:
@@ -143,27 +191,48 @@ def main() -> None:
 
     # Discover projects
     if args.projects:
-        project_ids = args.projects
+        project_ids = _dedupe_project_ids(args.projects)
         _log(f"Using {len(project_ids)} specified project(s).")
     else:
         _log(f"Discovering projects in org {args.org_id}...")
-        projects = list_org_projects(args.org_id)
+        try:
+            projects = list_org_projects(args.org_id)
+        except Exception as e:
+            _log(f"Failed to discover projects: {type(e).__name__}: {e}")
+            sys.exit(2)
         if not projects:
             _log("No projects found in organization.")
             sys.exit(1)
-        project_ids = [p["project_id"] for p in projects]
+        project_ids = _dedupe_project_ids([p["project_id"] for p in projects])
         _log(f"Found {len(project_ids)} project(s).")
 
     # Fetch appliance statuses
     _log("Querying Transfer Appliance status...")
-    appliances = get_all_appliances(project_ids, max_workers=args.workers)
+    try:
+        scan_results = get_all_appliances(project_ids, max_workers=args.workers)
+    except Exception as e:
+        _log(f"Failed to query Transfer Appliance status: {type(e).__name__}: {e}")
+        sys.exit(2)
+    appliances = scan_results.appliances
 
     # Apply state filter
     if args.state_filter:
         filter_states = {s.upper() for s in args.state_filter}
-        appliances = [a for a in appliances if a["state"] in filter_states]
+        appliances = [
+            a for a in appliances
+            if a["state"].upper() in filter_states
+        ]
+
+    if scan_results.errors:
+        _log(f"Scan failed for {len(scan_results.errors)} project(s); "
+             "results may be incomplete:")
+        for error in scan_results.errors:
+            _log(f"  {error['project']}: {error['error']}")
 
     if not appliances:
+        if scan_results.errors:
+            _log("No Transfer Appliances found in successfully scanned projects.")
+            sys.exit(2)
         _log("No Transfer Appliances found across scanned projects.")
         sys.exit(0)
 
@@ -176,6 +245,9 @@ def main() -> None:
         render_csv(appliances)
     else:
         render_table(appliances, tz)
+
+    if scan_results.errors:
+        sys.exit(2)
 
 
 if __name__ == "__main__":

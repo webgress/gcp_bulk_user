@@ -99,7 +99,7 @@ gcloud services enable cloudresourcemanager.googleapis.com --project=YOUR_QUOTA_
 gcloud services enable transferappliance.googleapis.com --project=PROJECT_ID
 ```
 
-If a scanned project doesn't have `transferappliance.googleapis.com` enabled, it will surface as `HTTP 403 SERVICE_DISABLED` on stderr and be skipped.
+If a scanned project doesn't have `transferappliance.googleapis.com` enabled, it will surface as `HTTP 403 SERVICE_DISABLED` on stderr, be reported as a scan failure, and make the CLI exit with status `2` after printing any partial results.
 
 ## Usage
 
@@ -173,8 +173,10 @@ python -m gcp_appliance_status --org-id 123456789 --format csv > report.csv
 ## How It Works
 
 1. **Project discovery** — queries the Cloud Resource Manager API to list all active projects under the given org ID.
-2. **Appliance status** — for each project, calls the Transfer Appliance `v1alpha1` REST endpoint directly (`https://transferappliance.googleapis.com/v1alpha1/projects/{project}/locations/-/orders`) using `AuthorizedSession` from `google-auth`, with `X-Goog-User-Project` set from the ADC quota project. If that fails, falls back to `gcloud alpha transfer appliances orders list`.
+2. **Appliance status** — for each project, calls the Transfer Appliance `v1alpha1` REST endpoint directly (`https://transferappliance.googleapis.com/v1alpha1/projects/{project}/locations/-/appliances`) using `AuthorizedSession` from `google-auth`, with `X-Goog-User-Project` set from the ADC quota project. If that fails, falls back to `gcloud alpha transfer appliances orders list`.
 3. **Aggregation** — results from all projects are merged and displayed in the chosen format.
+
+If a project cannot be scanned via either path, the CLI reports that project on stderr and exits with status `2` after printing any partial JSON/CSV/table output. A clean "no appliances found" result exits `0`.
 
 > The tool does **not** use `googleapiclient.discovery.build(...)` because Transfer Appliance does not publish a public discovery document at a stable path. Calling the REST URL directly is the supported approach while the API remains `v1alpha1`.
 

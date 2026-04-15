@@ -10,6 +10,7 @@ import json
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 
 import google.auth
 from google.auth.transport.requests import AuthorizedSession
@@ -17,13 +18,34 @@ from google.auth.transport.requests import AuthorizedSession
 TA_BASE_URL = "https://transferappliance.googleapis.com/v1alpha1"
 
 
-def _get_appliances_via_api(project_id: str) -> list[dict] | None:
+@dataclass
+class ProjectScanResult:
+    project: str
+    appliances: list[dict]
+    error: str | None = None
+
+
+@dataclass
+class ScanResults:
+    appliances: list[dict]
+    errors: list[dict]
+
+
+def _sanitize_display_name(value: object) -> str:
+    text = str(value or "")
+    sanitized = "".join(
+        char if char >= " " and char != "\x7f" else " "
+        for char in text
+    )
+    return " ".join(sanitized.split())
+
+
+def _get_appliances_via_api(project_id: str) -> tuple[list[dict] | None, str | None]:
     """Fetch appliance orders from the v1alpha1 REST endpoint directly.
 
-    Returns a list (possibly empty) on any completed HTTP exchange — a 4xx/5xx
-    is authoritative (gcloud hits the same endpoint, it will not do better).
-    Returns None only when we never got a response at all (transport error,
-    DNS, timeout), which is the one case where the gcloud fallback can help.
+    Returns (appliances, None) on success, where appliances may be empty.
+    Returns (None, error_message) on any transport, HTTP, or payload failure so
+    callers can decide whether to fall back to gcloud.
     """
     credentials, quota_project = google.auth.default(
         scopes=["https://www.googleapis.com/auth/cloud-platform"]
@@ -38,18 +60,24 @@ def _get_appliances_via_api(project_id: str) -> list[dict] | None:
     try:
         response = session.get(url, headers=headers, timeout=30)
     except Exception as e:
-        print(f"[api] {project_id}: {type(e).__name__}: {e}", file=sys.stderr)
-        return None
+        return None, f"[api] {project_id}: {type(e).__name__}: {e}"
 
     if response.status_code == 200:
-        return response.json().get("appliances", [])
+        try:
+            payload = response.json()
+        except ValueError as e:
+            return None, f"[api] {project_id}: invalid JSON: {e}"
+        appliances = payload.get("appliances", [])
+        if not isinstance(appliances, list):
+            return None, (f"[api] {project_id}: invalid payload: "
+                          "'appliances' must be a list")
+        return appliances, None
 
     body = response.text[:200].replace("\n", " ")
-    print(f"[api] {project_id}: HTTP {response.status_code} {body}", file=sys.stderr)
-    return []
+    return None, f"[api] {project_id}: HTTP {response.status_code} {body}"
 
 
-def _get_appliances_via_gcloud(project_id: str) -> list[dict]:
+def _get_appliances_via_gcloud(project_id: str) -> tuple[list[dict] | None, str | None]:
     """Fallback: fetch appliances using gcloud alpha CLI."""
     try:
         result = subprocess.run(
@@ -59,35 +87,55 @@ def _get_appliances_via_gcloud(project_id: str) -> list[dict]:
             ],
             capture_output=True, text=True, timeout=30,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            return json.loads(result.stdout)
         if result.returncode != 0:
-            print(f"[gcloud] {project_id}: rc={result.returncode} {result.stderr.strip()}",
-                  file=sys.stderr)
+            return None, (f"[gcloud] {project_id}: rc={result.returncode} "
+                          f"{result.stderr.strip()}")
+        if not result.stdout.strip():
+            return [], None
+
+        payload = json.loads(result.stdout)
+        if not isinstance(payload, list):
+            return None, f"[gcloud] {project_id}: invalid payload: expected a list"
+        return payload, None
     except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as e:
-        print(f"[gcloud] {project_id}: {type(e).__name__}: {e}", file=sys.stderr)
-    return []
+        return None, f"[gcloud] {project_id}: {type(e).__name__}: {e}"
 
 
-def get_appliances_for_project(project_id: str) -> list[dict]:
+def get_appliances_for_project(project_id: str) -> ProjectScanResult:
     """Get Transfer Appliance orders for a single project.
 
-    Tries the v1alpha1 REST API first. Only falls back to the gcloud CLI when
-    the API call itself failed (returned None) — a successful empty response
-    is treated as an authoritative "no appliances" and short-circuits.
+    Tries the v1alpha1 REST API first, then falls back to the gcloud CLI on
+    any API failure. A project is marked failed only if both mechanisms fail.
     """
-    appliances = _get_appliances_via_api(project_id)
-    if appliances is None:
-        appliances = _get_appliances_via_gcloud(project_id)
+    appliances, api_error = _get_appliances_via_api(project_id)
+    if api_error is not None:
+        appliances, gcloud_error = _get_appliances_via_gcloud(project_id)
+        if gcloud_error is not None:
+            return ProjectScanResult(
+                project=project_id,
+                appliances=[],
+                error=f"{api_error}; {gcloud_error}",
+            )
 
     # Normalize each record
     normalized = []
-    for a in appliances:
-        full_name = a.get("name", a.get("displayName", "unknown"))
-        location, appliance_id = _parse_resource_name(full_name)
+    row_errors = []
+    for a in appliances or []:
+        full_name = a.get("name")
+        if not isinstance(full_name, str) or not full_name:
+            row_errors.append("record missing resource name")
+            continue
+
+        parsed_name = _parse_resource_name(full_name)
+        if parsed_name is None:
+            row_errors.append(f"invalid resource name: {full_name!r}")
+            continue
+
+        location, appliance_id = parsed_name
         normalized.append({
             "project": project_id,
             "name": full_name,
+            "display_name": _sanitize_display_name(a.get("displayName", "")),
             "state": a.get("state", a.get("status", "UNKNOWN")),
             "type": a.get("applianceType", a.get("type", "N/A")),
             "create_time": a.get("createTime", "N/A"),
@@ -95,24 +143,34 @@ def get_appliances_for_project(project_id: str) -> list[dict]:
             "appliance_id": appliance_id,
             "location": location,
         })
-    return normalized
+    error = None
+    if row_errors:
+        sample = "; ".join(row_errors[:3])
+        if len(row_errors) > 3:
+            sample = f"{sample}; ..."
+        error = (f"skipped {len(row_errors)} malformed appliance record(s): "
+                 f"{sample}")
+    return ProjectScanResult(project=project_id, appliances=normalized, error=error)
 
 
-def _parse_resource_name(name: str) -> tuple[str, str]:
+def _parse_resource_name(name: str) -> tuple[str, str] | None:
     """Pull (location, appliance_id) out of projects/x/locations/L/appliances/Z.
 
-    Falls back to ("", name) if the string doesn't look like a resource name,
-    so callers can still display *something* and the deep-link just points at
-    the project root.
+    Returns None if the string doesn't match the expected resource shape.
     """
     parts = name.split("/")
     # Expected shape: ["projects", P, "locations", L, "appliances", Z]
-    if len(parts) >= 6 and parts[0] == "projects" and parts[2] == "locations":
+    if (
+        len(parts) >= 6
+        and parts[0] == "projects"
+        and parts[2] == "locations"
+        and parts[4] == "appliances"
+    ):
         return parts[3], parts[-1]
-    return "", parts[-1] if parts else name
+    return None
 
 
-def get_all_appliances(project_ids: list[str], max_workers: int = 10) -> list[dict]:
+def get_all_appliances(project_ids: list[str], max_workers: int = 10) -> ScanResults:
     """Fetch Transfer Appliance status across multiple projects in parallel.
 
     Args:
@@ -120,8 +178,9 @@ def get_all_appliances(project_ids: list[str], max_workers: int = 10) -> list[di
         max_workers: Max parallel threads for API calls.
 
     Returns:
-        Aggregated list of appliance records across all projects.
+        Aggregated appliances plus any project-level scan failures.
     """
+    project_ids = list(dict.fromkeys(project_ids))
     all_appliances = []
     errors = []
 
@@ -133,11 +192,19 @@ def get_all_appliances(project_ids: list[str], max_workers: int = 10) -> list[di
         for future in as_completed(future_to_project):
             project_id = future_to_project[future]
             try:
-                results = future.result()
-                all_appliances.extend(results)
+                result = future.result()
+                all_appliances.extend(result.appliances)
+                if result.error:
+                    errors.append({"project": project_id, "error": result.error})
             except Exception as e:
-                errors.append({"project": project_id, "error": str(e)})
+                message = str(e)
+                errors.append({"project": project_id, "error": message})
                 print(f"Warning: failed to query project {project_id}: {e}",
                       file=sys.stderr)
 
-    return all_appliances
+    all_appliances.sort(key=lambda appliance: (
+        appliance.get("project", ""),
+        appliance.get("appliance_id", ""),
+        appliance.get("name", ""),
+    ))
+    return ScanResults(appliances=all_appliances, errors=errors)
