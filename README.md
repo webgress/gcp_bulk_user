@@ -121,19 +121,39 @@ python -m gcp_appliance_status --org-id 123456789 --format csv > appliances.csv
 
 # Control parallelism (default: 10 threads)
 python -m gcp_appliance_status --org-id 123456789 --workers 20
+
+# Render table timestamps in a different timezone (default: America/Los_Angeles).
+# JSON and CSV output keep the raw ISO-8601 from the API regardless.
+python -m gcp_appliance_status --org-id 123456789 --timezone UTC
+python -m gcp_appliance_status --org-id 123456789 --timezone Europe/Berlin
 ```
 
 ## Output Formats
 
 ### Table (default)
 
-Plain columnar output, no colors or box drawing:
+Color-coded boxed table rendered with `rich`. States map to colors as:
+
+| State | Color |
+|-------|-------|
+| `DRAFT` | dim |
+| `REQUESTED` | yellow |
+| `PREPARING` | yellow |
+| `SHIPPING_TO_CUSTOMER` | cyan |
+| `ON_SITE` | green |
+| `PROCESSING` | magenta |
+| `WIPED` | blue |
+| `CANCELLED` | red |
+
+Unknown states render in white. Timestamps in the table are converted to the `--timezone` value (default `America/Los_Angeles`, which is PST/PDT with DST handled automatically).
 
 ```
-Project     Appliance ID  Type   State     Created     Updated
-----------  ------------  -----  --------  ----------  ----------
-proj-alpha  app-001       TA40   SHIPPING  2026-01-15  2026-03-20
-proj-beta   app-042       TA300  ACTIVE    2026-02-01  2026-03-24
+┌─────────────┬───────────────┬───────┬────────────┬─────────────┬─────────────┐
+│ Project     │ Appliance ID  │ Type  │ State      │ Created     │ Updated     │
+├─────────────┼───────────────┼───────┼────────────┼─────────────┼─────────────┤
+│ proj-alpha  │ app-001       │ TA40  │ PREPARING  │ 2026-01-15  │ 2026-03-20  │
+│ proj-beta   │ app-042       │ TA300 │ ON_SITE    │ 2026-02-01  │ 2026-03-24  │
+└─────────────┴───────────────┴───────┴────────────┴─────────────┴─────────────┘
 ```
 
 Progress messages ("Discovering projects...", "Found N project(s).") go to stderr so they don't contaminate piped output.

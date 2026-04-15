@@ -3,9 +3,30 @@
 import argparse
 import json
 import sys
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from rich.console import Console
+from rich.table import Table
 
 from .appliances import get_all_appliances
 from .projects import list_org_projects
+
+DEFAULT_TZ = "America/Los_Angeles"  # PST/PDT, handles DST automatically.
+
+# Appliance state colors (keys are compared case-insensitively).
+# Real v1alpha1 states seen so far: DRAFT, REQUESTED, PREPARING,
+# SHIPPING_TO_CUSTOMER, ON_SITE, PROCESSING, WIPED, CANCELLED.
+STATE_COLORS = {
+    "DRAFT":                "dim",
+    "REQUESTED":            "yellow",
+    "PREPARING":            "yellow",
+    "SHIPPING_TO_CUSTOMER": "cyan",
+    "ON_SITE":              "green",
+    "PROCESSING":           "magenta",
+    "WIPED":                "blue",
+    "CANCELLED":            "red",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -33,22 +54,51 @@ def build_parser() -> argparse.ArgumentParser:
         "--state-filter", nargs="*",
         help="Only show appliances in these states (e.g. ACTIVE SHIPPING).",
     )
+    parser.add_argument(
+        "--timezone", default=DEFAULT_TZ,
+        help=f"IANA timezone for table timestamps (default: {DEFAULT_TZ}). "
+             "JSON/CSV output keeps raw ISO-8601 from the API.",
+    )
     return parser
 
 
-def render_table(appliances: list[dict]) -> None:
-    headers = ["Project", "Appliance ID", "Type", "State", "Created", "Updated"]
-    rows = [
-        [a["project"], a["appliance_id"], a["type"], a["state"],
-         a["create_time"], a["update_time"]]
-        for a in appliances
-    ]
-    widths = [max(len(str(r[i])) for r in ([headers] + rows)) for i in range(len(headers))]
-    sep = "  "
-    print(sep.join(h.ljust(widths[i]) for i, h in enumerate(headers)))
-    print(sep.join("-" * widths[i] for i in range(len(headers))))
-    for r in rows:
-        print(sep.join(str(r[i]).ljust(widths[i]) for i in range(len(headers))))
+def _format_ts(iso_str: str, tz: ZoneInfo) -> str:
+    """Format an ISO-8601 timestamp for humans, in the given tz."""
+    if not iso_str or iso_str == "N/A":
+        return iso_str or "N/A"
+    # Google APIs return "...Z"; fromisoformat accepts +00:00 in 3.11+,
+    # so normalise manually for 3.9/3.10 compat.
+    s = iso_str.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return iso_str  # fall back to raw string if we can't parse it
+    return dt.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
+
+
+def render_table(appliances: list[dict], tz: ZoneInfo) -> None:
+    console = Console()
+    table = Table(title="Transfer Appliance Status", show_lines=True)
+    table.add_column("Project", style="bold")
+    table.add_column("Appliance ID")
+    table.add_column("Type")
+    table.add_column("State")
+    table.add_column("Created")
+    table.add_column("Updated")
+
+    for a in appliances:
+        state = a["state"]
+        color = STATE_COLORS.get(state.upper(), "white")
+        table.add_row(
+            a["project"],
+            a["appliance_id"],
+            a["type"],
+            f"[{color}]{state}[/{color}]",
+            _format_ts(a["create_time"], tz),
+            _format_ts(a["update_time"], tz),
+        )
+
+    console.print(table)
 
 
 def render_csv(appliances: list[dict]) -> None:
@@ -65,6 +115,13 @@ def _log(msg: str) -> None:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+
+    try:
+        tz = ZoneInfo(args.timezone)
+    except ZoneInfoNotFoundError:
+        _log(f"Unknown timezone: {args.timezone!r}. Use an IANA name like "
+             "'America/Los_Angeles' or 'UTC'.")
+        sys.exit(2)
 
     # Discover projects
     if args.projects:
@@ -100,7 +157,7 @@ def main() -> None:
     elif args.output_format == "csv":
         render_csv(appliances)
     else:
-        render_table(appliances)
+        render_table(appliances, tz)
 
 
 if __name__ == "__main__":
