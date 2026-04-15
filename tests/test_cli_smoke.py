@@ -223,6 +223,19 @@ class CliSmokeTests(unittest.TestCase):
 
 
 class ApplianceHelpersTests(unittest.TestCase):
+    def test_appliance_url_matches_pantheon_format(self) -> None:
+        self.assertEqual(
+            cli._appliance_url("proj-123", "us-central1", "appliance-xyz"),
+            ("https://pantheon.corp.google.com/appliances/us-central1/"
+             "appliance-xyz;tab=configuration?project=proj-123"),
+        )
+
+    def test_project_url_matches_pantheon_format(self) -> None:
+        self.assertEqual(
+            cli._project_url("proj-123"),
+            "https://pantheon.corp.google.com/home/dashboard?project=proj-123",
+        )
+
     def test_falls_back_to_gcloud_on_api_error(self) -> None:
         gcloud_payload = [{
             "name": "projects/p1/locations/us-central1/appliances/appliance-123",

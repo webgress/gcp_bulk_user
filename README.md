@@ -146,6 +146,7 @@ Color-coded boxed table rendered with `rich`. States map to colors as:
 | `CANCELLED` | red |
 
 Unknown states render in white. Timestamps in the table are converted to the `--timezone` value (default `America/Los_Angeles`, which is PST/PDT with DST handled automatically).
+The `Project` and `Appliance ID` columns are clickable deep links in terminals that support Rich hyperlinks. Project links open Pantheon project home, and appliance IDs open Pantheon appliance configuration pages.
 
 ```
 ┌─────────────┬───────────────┬───────┬────────────┬─────────────┬─────────────┐
