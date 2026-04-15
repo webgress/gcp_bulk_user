@@ -14,6 +14,21 @@ from .projects import list_org_projects
 
 DEFAULT_TZ = "America/Los_Angeles"  # PST/PDT, handles DST automatically.
 
+PANTHEON_BASE = "https://pantheon.corp.google.com"
+
+
+def _appliance_url(project: str, location: str, appliance_id: str) -> str:
+    # Pantheon appliance detail page. Falls back to the project home if we
+    # couldn't parse a location out of the resource name.
+    if not location:
+        return f"{PANTHEON_BASE}/home/dashboard?project={project}"
+    return (f"{PANTHEON_BASE}/appliances/{location}/{appliance_id}"
+            f";tab=configuration?project={project}")
+
+
+def _project_url(project: str) -> str:
+    return f"{PANTHEON_BASE}/home/dashboard?project={project}"
+
 # Appliance state colors (keys are compared case-insensitively).
 # Real v1alpha1 states seen so far: DRAFT, REQUESTED, PREPARING,
 # SHIPPING_TO_CUSTOMER, ON_SITE, PROCESSING, WIPED, CANCELLED.
@@ -89,9 +104,12 @@ def render_table(appliances: list[dict], tz: ZoneInfo) -> None:
     for a in appliances:
         state = a["state"]
         color = STATE_COLORS.get(state.upper(), "white")
+        proj_link = _project_url(a["project"])
+        app_link = _appliance_url(a["project"], a.get("location", ""),
+                                  a["appliance_id"])
         table.add_row(
-            a["project"],
-            a["appliance_id"],
+            f"[link={proj_link}]{a['project']}[/link]",
+            f"[link={app_link}]{a['appliance_id']}[/link]",
             a["type"],
             f"[{color}]{state}[/{color}]",
             _format_ts(a["create_time"], tz),

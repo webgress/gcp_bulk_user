@@ -83,22 +83,33 @@ def get_appliances_for_project(project_id: str) -> list[dict]:
     # Normalize each record
     normalized = []
     for a in appliances:
+        full_name = a.get("name", a.get("displayName", "unknown"))
+        location, appliance_id = _parse_resource_name(full_name)
         normalized.append({
             "project": project_id,
-            "name": a.get("name", a.get("displayName", "unknown")),
+            "name": full_name,
             "state": a.get("state", a.get("status", "UNKNOWN")),
             "type": a.get("applianceType", a.get("type", "N/A")),
             "create_time": a.get("createTime", "N/A"),
             "update_time": a.get("updateTime", "N/A"),
-            "appliance_id": _extract_resource_id(a.get("name", "")),
+            "appliance_id": appliance_id,
+            "location": location,
         })
     return normalized
 
 
-def _extract_resource_id(name: str) -> str:
-    """Extract the trailing ID from a resource name like projects/x/locations/y/appliances/z."""
+def _parse_resource_name(name: str) -> tuple[str, str]:
+    """Pull (location, appliance_id) out of projects/x/locations/L/appliances/Z.
+
+    Falls back to ("", name) if the string doesn't look like a resource name,
+    so callers can still display *something* and the deep-link just points at
+    the project root.
+    """
     parts = name.split("/")
-    return parts[-1] if parts else name
+    # Expected shape: ["projects", P, "locations", L, "appliances", Z]
+    if len(parts) >= 6 and parts[0] == "projects" and parts[2] == "locations":
+        return parts[3], parts[-1]
+    return "", parts[-1] if parts else name
 
 
 def get_all_appliances(project_ids: list[str], max_workers: int = 10) -> list[dict]:
