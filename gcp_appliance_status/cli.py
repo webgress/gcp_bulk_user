@@ -303,6 +303,8 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
       font: 600 0.7rem/1.2 ui-monospace, "SFMono-Regular", Menlo, monospace;
       letter-spacing: 0.08em;
       text-transform: uppercase;
+      word-break: break-word;
+      overflow-wrap: anywhere;
     }}
 
     .card-value {{
@@ -599,7 +601,7 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
 
       renderCards(summaryStatesEl, Array.from(counts.entries())
         .sort((a, b) => compareValues(a[0], b[0]))
-        .map(([state, count]) => ({{ label: state, value: count.toString() }})));
+        .map(([state, count]) => ({{ label: state.replace(/_/g, " "), value: count.toString() }})));
     }}
 
     function renderRows() {{
