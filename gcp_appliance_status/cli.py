@@ -39,7 +39,7 @@ def _appliance_url(project: str, location: str, appliance_id: str) -> str:
 
 
 def _project_url(project: str) -> str:
-    return f"{PANTHEON_BASE}/home/dashboard?{urlencode({'project': project})}"
+    return f"{PANTHEON_BASE}/appliances?{urlencode({'project': project})}"
 
 # Appliance state colors (keys are compared case-insensitively).
 # Real v1alpha1 states seen so far: DRAFT, REQUESTED, PREPARING,
