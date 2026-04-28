@@ -616,8 +616,8 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
         const tr = document.createElement("tr");
         const stateColor = stateColors[row.state] || "#5f4a33";
         tr.innerHTML = `
-          <td class="mono"><a href="${{row.project_url}}">${{row.project}}</a></td>
-          <td class="mono"><a href="${{row.appliance_url}}">${{row.appliance_id}}</a></td>
+          <td class="mono"><a href="${{row.project_url}}" target="_blank" rel="noopener noreferrer">${{row.project}}</a></td>
+          <td class="mono"><a href="${{row.appliance_url}}" target="_blank" rel="noopener noreferrer">${{row.appliance_id}}</a></td>
           <td class="mono">${{row.model}}</td>
           <td><span class="state" style="color:${{stateColor}}">${{row.state}}</span></td>
           <td>${{formatTime(row.create_time)}}</td>
