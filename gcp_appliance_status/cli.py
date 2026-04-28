@@ -565,8 +565,8 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
       "CANCELLED",
     ];
 
-    let sortKey = "project";
-    let sortDir = "asc";
+    let sortKey = "update_time";
+    let sortDir = "desc";
 
     function countBy(key) {{
       const counts = new Map();
