@@ -214,10 +214,6 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
     generated_at = datetime.now().astimezone().isoformat(timespec="seconds")
     title = "Transfer Appliance Report"
     heading = f"{title} — org {html.escape(org_id)}"
-    state_options = "".join(
-        f'<option value="{html.escape(state)}">{html.escape(state)}</option>'
-        for state in sorted({str(a["state"]) for a in appliances}, key=str.upper)
-    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -281,13 +277,32 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
       margin-top: 8px;
     }}
 
-    .summary-totals {{
-      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-      max-width: 360px;
+    .totals {{
+      font: 500 0.95rem/1.3 "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+      color: var(--muted);
+      margin-left: auto;
+    }}
+
+    .totals strong {{
+      color: var(--text);
+      font-weight: 700;
+    }}
+
+    .totals .sep {{
+      margin: 0 8px;
+      opacity: 0.5;
     }}
 
     .summary-states {{
       margin-top: 10px;
+      grid-template-columns: repeat(10, minmax(0, 1fr));
+      gap: 6px;
+    }}
+
+    @media (max-width: 900px) {{
+      .summary-states {{
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+      }}
     }}
 
     .card {{
@@ -315,6 +330,45 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
       font-size: 1.4rem;
       line-height: 1;
       align-self: flex-start;
+    }}
+
+    .state-card {{
+      all: unset;
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      border-radius: 12px;
+      padding: 6px 8px;
+      box-shadow: var(--shadow);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      min-height: 60px;
+      cursor: pointer;
+      transition: opacity 0.15s ease, transform 0.05s ease, background 0.15s ease;
+      box-sizing: border-box;
+    }}
+
+    .state-card:hover {{
+      background: rgba(255, 252, 245, 0.95);
+    }}
+
+    .state-card:active {{
+      transform: scale(0.98);
+    }}
+
+    .state-card[aria-pressed="false"] {{
+      opacity: 0.35;
+      background: rgba(228, 220, 205, 0.35);
+      box-shadow: none;
+    }}
+
+    .state-card .card-label {{
+      font-size: 0.58rem;
+      letter-spacing: 0.05em;
+    }}
+
+    .state-card .card-value {{
+      font-size: 1.05rem;
     }}
 
     .toolbar {{
@@ -438,22 +492,15 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
   <main>
     <section class="hero">
       <h1>{heading}</h1>
+      <div class="totals" id="totals"></div>
     </section>
 
-    <section class="summary summary-totals" id="summary-totals"></section>
     <section class="summary summary-states" id="summary-states"></section>
 
     <section class="toolbar">
       <div class="field">
         <label for="search">Search</label>
         <input id="search" type="search" placeholder="Project, appliance ID, model, state">
-      </div>
-      <div class="field">
-        <label for="state-filter">State</label>
-        <select id="state-filter">
-          <option value="">All states</option>
-          {state_options}
-        </select>
       </div>
       <div class="field">
         <label for="project-filter">Project</label>
@@ -486,11 +533,10 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
   <script>
     const appliances = JSON.parse(document.getElementById("report-data").textContent);
     const rowsEl = document.getElementById("rows");
-    const summaryTotalsEl = document.getElementById("summary-totals");
+    const totalsEl = document.getElementById("totals");
     const summaryStatesEl = document.getElementById("summary-states");
     const footerEl = document.getElementById("footer");
     const searchEl = document.getElementById("search");
-    const stateFilterEl = document.getElementById("state-filter");
     const projectFilterEl = document.getElementById("project-filter");
     const sortButtons = Array.from(document.querySelectorAll("[data-sort]"));
 
@@ -530,7 +576,6 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
     }}
 
     const projectCounts = countBy("project");
-    const stateCounts = countBy("state");
 
     const projects = Array.from(projectCounts.keys()).sort();
     projectFilterEl.options[0].textContent = `All projects (${{appliances.length}})`;
@@ -541,15 +586,7 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
       projectFilterEl.appendChild(option);
     }}
 
-    const states = Array.from(stateCounts.keys()).sort((a, b) => compareValues(a, b));
-    stateFilterEl.options[0].textContent = `All states (${{appliances.length}})`;
-    stateFilterEl.length = 1;
-    for (const state of states) {{
-      const option = document.createElement("option");
-      option.value = state;
-      option.textContent = `${{state}}: ${{stateCounts.get(state)}}`;
-      stateFilterEl.appendChild(option);
-    }}
+    const excludedStates = new Set();
 
     function formatTime(value) {{
       if (!value || value === "N/A") return value || "N/A";
@@ -570,13 +607,10 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
       return 0;
     }}
 
-    function getFilteredRows() {{
+    function applyTextFilters(rows) {{
       const query = searchEl.value.trim().toLowerCase();
-      const stateFilter = stateFilterEl.value;
       const projectFilter = projectFilterEl.value;
-
-      return appliances
-        .filter((row) => !stateFilter || row.state === stateFilter)
+      return rows
         .filter((row) => !projectFilter || row.project === projectFilter)
         .filter((row) => {{
           if (!query) return true;
@@ -588,43 +622,60 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
             row.create_time,
             row.update_time,
           ].some((value) => (value || "").toString().toLowerCase().includes(query));
-        }})
+        }});
+    }}
+
+    function getFilteredRows() {{
+      return applyTextFilters(appliances)
+        .filter((row) => !excludedStates.has(row.state))
         .sort((left, right) => {{
           const base = compareValues(left[sortKey], right[sortKey]);
           return sortDir === "asc" ? base : -base;
         }});
     }}
 
-    function renderCards(target, cards) {{
-      target.innerHTML = "";
-      for (const card of cards) {{
-        const el = document.createElement("article");
-        el.className = "card";
-        el.innerHTML = `<div class="card-label">${{card.label}}</div><div class="card-value">${{card.value}}</div>`;
-        target.appendChild(el);
-      }}
-    }}
-
-    function renderSummary(rows) {{
-      const counts = new Map();
-      for (const row of rows) {{
-        counts.set(row.state, (counts.get(row.state) || 0) + 1);
-      }}
-
-      renderCards(summaryTotalsEl, [
-        {{ label: "Total rows", value: appliances.length.toString() }},
-        {{ label: "Visible rows", value: rows.length.toString() }},
-      ]);
-
+    function renderStateCards(counts) {{
       const ordered = STATE_ORDER.map((state) => [state, counts.get(state) || 0]);
       const extras = Array.from(counts.entries())
         .filter(([state]) => !STATE_ORDER.includes(state))
         .sort((a, b) => compareValues(a[0], b[0]));
 
-      renderCards(summaryStatesEl, [...ordered, ...extras].map(([state, count]) => ({{
-        label: state.replace(/_/g, " "),
-        value: count.toString(),
-      }})));
+      summaryStatesEl.innerHTML = "";
+      for (const [state, count] of [...ordered, ...extras]) {{
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "state-card";
+        btn.dataset.state = state;
+        btn.setAttribute("aria-pressed", excludedStates.has(state) ? "false" : "true");
+        btn.title = excludedStates.has(state)
+          ? `Click to include ${{state}}`
+          : `Click to exclude ${{state}}`;
+        btn.innerHTML = `<div class="card-label">${{state.replace(/_/g, " ")}}</div><div class="card-value">${{count}}</div>`;
+        btn.addEventListener("click", () => {{
+          if (excludedStates.has(state)) {{
+            excludedStates.delete(state);
+          }} else {{
+            excludedStates.add(state);
+          }}
+          renderRows();
+        }});
+        summaryStatesEl.appendChild(btn);
+      }}
+    }}
+
+    function renderSummary(rows) {{
+      const baseRows = applyTextFilters(appliances);
+      const counts = new Map();
+      for (const row of baseRows) {{
+        counts.set(row.state, (counts.get(row.state) || 0) + 1);
+      }}
+
+      totalsEl.innerHTML =
+        `Total Appliances: <strong>${{appliances.length}}</strong>` +
+        `<span class="sep">·</span>` +
+        `<strong>${{rows.length}}</strong> visible`;
+
+      renderStateCards(counts);
     }}
 
     function renderRows() {{
@@ -672,7 +723,6 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
     }}
 
     searchEl.addEventListener("input", renderRows);
-    stateFilterEl.addEventListener("change", renderRows);
     projectFilterEl.addEventListener("change", renderRows);
 
     for (const button of sortButtons) {{
