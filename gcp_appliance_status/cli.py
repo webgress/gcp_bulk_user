@@ -34,7 +34,7 @@ def _appliance_url(project: str, location: str, appliance_id: str) -> str:
     query = urlencode({"project": project})
     safe_location = quote(location, safe="")
     safe_appliance_id = quote(appliance_id, safe="")
-    return (f"{PANTHEON_BASE}/appliances/{safe_location}/{safe_appliance_id}"
+    return (f"{PANTHEON_BASE}/appliances/{safe_location}/{safe_appliance_id}/details"
             f";tab=configuration?{query}")
 
 
@@ -296,6 +296,10 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
       border-radius: 14px;
       padding: 10px 14px;
       box-shadow: var(--shadow);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      min-height: 72px;
     }}
 
     .card-label {{
@@ -308,9 +312,9 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
     }}
 
     .card-value {{
-      margin-top: 4px;
       font-size: 1.4rem;
       line-height: 1;
+      align-self: flex-start;
     }}
 
     .toolbar {{
