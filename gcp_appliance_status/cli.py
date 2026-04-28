@@ -505,6 +505,19 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
       CANCELLED: "#ad2831",
     }};
 
+    const STATE_ORDER = [
+      "DRAFT",
+      "REQUESTED",
+      "AWAITING_INVENTORY",
+      "PREPARING",
+      "SHIPPING_TO_CUSTOMER",
+      "ON_SITE",
+      "SHIPPING_TO_GOOGLE",
+      "PROCESSING",
+      "WIPED",
+      "CANCELLED",
+    ];
+
     let sortKey = "project";
     let sortDir = "asc";
 
@@ -603,9 +616,15 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
         {{ label: "Visible rows", value: rows.length.toString() }},
       ]);
 
-      renderCards(summaryStatesEl, Array.from(counts.entries())
-        .sort((a, b) => compareValues(a[0], b[0]))
-        .map(([state, count]) => ({{ label: state.replace(/_/g, " "), value: count.toString() }})));
+      const ordered = STATE_ORDER.map((state) => [state, counts.get(state) || 0]);
+      const extras = Array.from(counts.entries())
+        .filter(([state]) => !STATE_ORDER.includes(state))
+        .sort((a, b) => compareValues(a[0], b[0]));
+
+      renderCards(summaryStatesEl, [...ordered, ...extras].map(([state, count]) => ({{
+        label: state.replace(/_/g, " "),
+        value: count.toString(),
+      }})));
     }}
 
     function renderRows() {{
