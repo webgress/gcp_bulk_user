@@ -357,8 +357,9 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
     }}
 
     .state-card[aria-pressed="false"] {{
-      opacity: 0.35;
-      background: rgba(228, 220, 205, 0.35);
+      opacity: 0.6;
+      background: rgba(228, 220, 205, 0.55);
+      border-color: rgba(87, 63, 34, 0.18);
       box-shadow: none;
     }}
 
