@@ -7,7 +7,7 @@ This repo contains **two implementations** of the same tool. Pick the one that m
 | Folder | Install model | Runtime deps | Best for |
 |---|---|---|---|
 | [python-gcloud/](python-gcloud/) | `pip install -r requirements.txt` | Python 3.10+, gcloud SDK | Use this if your environment already has python and gcloud installed. |
-| [go-binary/](go-binary/) | Download one binary | None | Same process and output as the python implementation. Convenient single file download, no dependencies to install. |
+| [go-binary/](go-binary/) | Download one binary | None | Same process and output as the python implementation. Convenient single file download, no dependencies to install. Shares ADC with gcloud — if you have gcloud installed and logged in, the binary uses that token automatically. |
 
 Both produce identical output and accept the same CLI flags. They differ only in install footprint.
 
