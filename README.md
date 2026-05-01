@@ -9,7 +9,7 @@ This repo contains **two implementations** of the same tool. Pick the one that m
 | [python-gcloud/](python-gcloud/) | `pip install -r requirements.txt` | Python 3.10+, gcloud SDK | Use this if your environment already has python and gcloud installed. |
 | [go-binary/](go-binary/) | Download one binary | None | Same process and output as the python implementation. Convenient single file download, no dependencies to install. |
 
-All three produce identical output and accept the same CLI flags. They differ only in install footprint.
+Both produce identical output and accept the same CLI flags. They differ only in install footprint.
 
 ## Which should I use?
 
@@ -18,7 +18,7 @@ All three produce identical output and accept the same CLI flags. They differ on
 
 ## Required permissions
 
-The identity running this tool needs three IAM bindings. Grant once and use across all three implementations:
+The identity running this tool needs three IAM bindings. Grant once and use with any implementation:
 
 | Role | Scope | Why |
 |---|---|---|
@@ -30,7 +30,7 @@ If `roles/transferappliance.viewer` isn't yet available in your environment, fal
 
 ### About the quota project
 
-Every Google Cloud API call has to be charged against a project for quota and billing purposes — this is the **quota project**, and it's separate from the projects you're querying. You'll typically use a small admin project you own.
+Every Google Cloud API call has to be charged against a project for quota and billing purposes — this is the **quota project**, and it's separate from the projects you're querying. Practically any project you own will work here.
 
 - When listing projects org-wide, you must pass `--quota-project=YOUR_ADMIN_PROJECT` explicitly.
 - When you pass `--projects proj-a proj-b ...` directly, the first project in the list is used as the quota project automatically (override with `--quota-project` if you want).
