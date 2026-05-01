@@ -2,7 +2,13 @@
 
 Single static binary that views Google Transfer Appliance status across every project in a GCP organization. No Python, no gcloud, no shared libraries beyond libc — drop the file in your `PATH` and run it.
 
-Behavior-equivalent with the [`python-gcloud`](../python-gcloud/) implementation: same flags, same output schemas, same Pantheon links, same parallel scan model. The only difference is **how you authenticate**: this binary opens its own browser-based OAuth flow on first run, so you don't need a working `gcloud` install or `gcloud auth application-default login`.
+Behavior-equivalent with the [`python-gcloud`](../python-gcloud/) implementation: same flags, same output schemas, same Pantheon links, same parallel scan model.
+
+**This binary shares Application Default Credentials (ADC) with `gcloud`.** It reads from and writes to the same file gcloud uses (`~/.config/gcloud/application_default_credentials.json`) in the same `authorized_user` JSON format. So:
+
+- If you've already run `gcloud auth application-default login`, this binary uses that token with **no separate login**.
+- If you log in via this binary first, subsequent gcloud commands use the same token.
+- `gcp-appliance-status --logout` and `gcloud auth application-default revoke` are interchangeable.
 
 ## Install
 
@@ -32,9 +38,21 @@ Build targets shipped in each release:
 
 > **Sandbox note.** This implementation is built and smoke-tested on Linux. macOS and Windows targets cross-compile cleanly but are exercised manually by the maintainer.
 
-## OAuth client setup (one-time)
+## Authentication
 
-Because this binary doesn't ship a baked-in OAuth client (we don't want a public `client_secret` in a public binary), you supply your own. Once per workstation:
+You have two ways to provision credentials. Pick whichever is more convenient — the resulting file format is identical and the two tools share it.
+
+### Option A — use gcloud (recommended if you already have it)
+
+```bash
+gcloud auth application-default login
+```
+
+Done. This binary will pick up the same credentials on its next run. No env vars, no separate sign-in.
+
+### Option B — use this binary's own OAuth flow (no gcloud install needed)
+
+Provide a desktop OAuth client of your own (we don't ship one — embedding a public `client_secret` would be a footgun):
 
 1. Open the [GCP credentials console](https://console.cloud.google.com/apis/credentials) in any project you own.
 2. **Create credentials → OAuth client ID → Application type: Desktop app**. Name it whatever you like.
@@ -46,16 +64,24 @@ Because this binary doesn't ship a baked-in OAuth client (we don't want a public
    export GCP_OAUTH_CLIENT_SECRET='GOCSPX-xxxxxxxxxxxxxxxxxxxxxxxx'
    ```
 
-   (Add these to your shell profile if you'd rather not paste each session.)
+On first run, the binary opens a browser for consent and writes the resulting credentials to the shared ADC file.
 
-On first run the binary will open a browser, you'll consent once, and the resulting token is cached at:
+### Where the credentials live
 
 | OS | Path |
 |---|---|
-| Linux / macOS | `~/.config/gcp-appliance-status/credentials.json` |
-| Windows | `%APPDATA%\gcp-appliance-status\credentials.json` |
+| Linux / macOS | `~/.config/gcloud/application_default_credentials.json` |
+| Windows | `%APPDATA%\gcloud\application_default_credentials.json` |
 
-Subsequent runs refresh the token silently. To force re-consent, delete that file.
+Override the parent directory with the standard `CLOUDSDK_CONFIG` env var (the same one gcloud honors). On POSIX the file is mode `0600`, the parent directory `0700`.
+
+### Logging out
+
+```bash
+./gcp-appliance-status --logout
+```
+
+Same behavior as `gcloud auth application-default revoke`: revokes the refresh token at `oauth2.googleapis.com/revoke` and deletes the local file. Both tools now have nothing — log back in via either Option A or B.
 
 ## Grant IAM (one-time, at the org level)
 
@@ -100,8 +126,9 @@ Every Google Cloud API call must charge a project for quota and billing. The bin
 
 1. `--quota-project` flag.
 2. `GCP_QUOTA_PROJECT` env var.
-3. The first project in `--projects` when that flag is supplied.
-4. **Otherwise it exits with status 2** and tells you to pass `--quota-project`.
+3. `quota_project_id` from the ADC file — set persistently with `gcloud auth application-default set-quota-project YOUR_PROJECT`. This is the gcloud-native path and survives across sessions.
+4. The first project in `--projects` when that flag is supplied (auto-derive convenience).
+5. **Otherwise it exits with status 2** and tells you how to set one.
 
 The resolved value is sent as `X-Goog-User-Project` on every request — both the Resource Manager `projects:search` call used for org discovery and the Transfer Appliance v1alpha1 call used per project.
 
@@ -131,14 +158,14 @@ The release builds use `CGO_ENABLED=0` and `-ldflags="-s -w"`. Stripped binaries
 
 ## Troubleshooting
 
-**"OAuth credentials not configured"** — set `GCP_OAUTH_CLIENT_ID` and `GCP_OAUTH_CLIENT_SECRET` per the OAuth client setup section above.
+**"no credentials at … and GCP_OAUTH_CLIENT_ID and GCP_OAUTH_CLIENT_SECRET are not set"** — either run `gcloud auth application-default login` (Option A above), or set the two env vars and let this binary do its own browser flow (Option B).
 
-**"A quota project is required for org-wide project discovery"** — pass `--quota-project YOUR_PROJECT` (any project you own).
+**"A quota project is required for org-wide project discovery"** — pass `--quota-project YOUR_PROJECT`, or persist one with `gcloud auth application-default set-quota-project YOUR_PROJECT`.
 
 **HTTP 403 from Transfer Appliance for every project** — the v1alpha1 API is in early access; reach out to your Google Cloud support representative if persistent.
 
 **Browser doesn't open during first-run consent** — the URL is printed to stderr; copy it into a browser by hand. The local listener on `127.0.0.1:<random>` will accept the redirect.
 
-**Force re-consent / switch Google account** — delete the credentials file shown in the table above and re-run.
+**Force re-consent / switch Google account** — `gcp-appliance-status --logout` (or `gcloud auth application-default revoke`), then log back in via either option above.
 
 See [SPEC.md](SPEC.md) for the requirements driving the implementation.

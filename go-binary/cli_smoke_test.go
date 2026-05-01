@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -184,26 +187,146 @@ func TestExpandRepeatedFlags(t *testing.T) {
 
 func TestQuotaProjectResolution(t *testing.T) {
 	t.Setenv("GCP_QUOTA_PROJECT", "")
-	got, err := resolveQuotaProject(cliFlags{quotaProject: "explicit"})
+	got, err := resolveQuotaProject(cliFlags{quotaProject: "explicit"}, "fromADC")
 	if err != nil || got != "explicit" {
 		t.Errorf("flag wins: got (%q, %v)", got, err)
 	}
 
 	t.Setenv("GCP_QUOTA_PROJECT", "fromEnv")
-	got, err = resolveQuotaProject(cliFlags{})
+	got, err = resolveQuotaProject(cliFlags{}, "fromADC")
 	if err != nil || got != "fromEnv" {
-		t.Errorf("env wins: got (%q, %v)", got, err)
+		t.Errorf("env wins over ADC: got (%q, %v)", got, err)
 	}
 
 	t.Setenv("GCP_QUOTA_PROJECT", "")
-	got, err = resolveQuotaProject(cliFlags{projects: []string{"first", "second"}})
-	if err != nil || got != "first" {
-		t.Errorf("first project: got (%q, %v)", got, err)
+	got, err = resolveQuotaProject(cliFlags{projects: []string{"first", "second"}}, "fromADC")
+	if err != nil || got != "fromADC" {
+		t.Errorf("ADC wins over auto-derive: got (%q, %v)", got, err)
 	}
 
-	got, err = resolveQuotaProject(cliFlags{})
+	got, err = resolveQuotaProject(cliFlags{projects: []string{"first", "second"}}, "")
+	if err != nil || got != "first" {
+		t.Errorf("auto-derive from --projects: got (%q, %v)", got, err)
+	}
+
+	got, err = resolveQuotaProject(cliFlags{}, "")
 	if err == nil {
 		t.Errorf("expected error for org-wide-without-quota, got %q", got)
+	}
+	if err != nil && !strings.Contains(err.Error(), "set-quota-project") {
+		t.Errorf("error should reference gcloud set-quota-project; got %q", err.Error())
+	}
+}
+
+func TestADCRoundTripPreservesUnknownFields(t *testing.T) {
+	original := []byte(`{
+  "type": "authorized_user",
+  "client_id": "id",
+  "client_secret": "secret",
+  "refresh_token": "rt-old",
+  "quota_project_id": "qproj",
+  "account": "user@example.com",
+  "universe_domain": "googleapis.com"
+}`)
+	parsed, err := parseADC(original)
+	if err != nil {
+		t.Fatalf("parseADC: %v", err)
+	}
+	if parsed.RefreshToken != "rt-old" || parsed.QuotaProjectID != "qproj" {
+		t.Errorf("parsed unexpected: %+v", parsed)
+	}
+
+	// Mutate refresh_token (simulating gcloud-style rotation) and re-marshal.
+	parsed.RefreshToken = "rt-new"
+	out, err := parsed.marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(out)
+	for _, want := range []string{
+		`"account"`, `"universe_domain"`, `"refresh_token": "rt-new"`,
+		`"quota_project_id": "qproj"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("marshalled output missing %s\n--- got ---\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "rt-old") {
+		t.Errorf("marshalled output still contains stale refresh token")
+	}
+}
+
+func TestADCFileIsRemovedQuotaProjectWhenCleared(t *testing.T) {
+	original := []byte(`{
+  "type": "authorized_user",
+  "client_id": "id",
+  "client_secret": "secret",
+  "refresh_token": "rt",
+  "quota_project_id": "qproj"
+}`)
+	parsed, err := parseADC(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed.QuotaProjectID = ""
+	out, err := parsed.marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "quota_project_id") {
+		t.Errorf("cleared quota_project_id should be omitted, got: %s", out)
+	}
+}
+
+func TestCredentialsPathHonorsCloudSDKConfig(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("CLOUDSDK_CONFIG", tmp)
+	got, err := credentialsPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(tmp, "application_default_credentials.json")
+	if got != want {
+		t.Errorf("credentialsPath = %q want %q", got, want)
+	}
+}
+
+func TestCredentialsPathDefaultIsGcloudDir(t *testing.T) {
+	t.Setenv("CLOUDSDK_CONFIG", "")
+	got, err := credentialsPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(got, filepath.Join("gcloud", "application_default_credentials.json")) {
+		t.Errorf("default credentials path should land in gcloud/...; got %q", got)
+	}
+}
+
+func TestWriteADCSetsRestrictivePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only mode check")
+	}
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "gcloud", "application_default_credentials.json")
+	creds := &adcFile{
+		Type: "authorized_user", ClientID: "x", ClientSecret: "y", RefreshToken: "z",
+	}
+	if err := writeADC(path, creds); err != nil {
+		t.Fatalf("writeADC: %v", err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := st.Mode().Perm(); mode != 0o600 {
+		t.Errorf("file mode = %o want 600", mode)
+	}
+	parent, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := parent.Mode().Perm(); mode != 0o700 {
+		t.Errorf("parent dir mode = %o want 700", mode)
 	}
 }
 

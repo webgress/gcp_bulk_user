@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -14,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -21,86 +23,84 @@ import (
 )
 
 const (
-	envClientID     = "GCP_OAUTH_CLIENT_ID"
-	envClientSecret = "GCP_OAUTH_CLIENT_SECRET"
-	cloudPlatform   = "https://www.googleapis.com/auth/cloud-platform"
-	appConfigDir    = "gcp-appliance-status"
-	credsFilename   = "credentials.json"
+	envClientID       = "GCP_OAUTH_CLIENT_ID"
+	envClientSecret   = "GCP_OAUTH_CLIENT_SECRET"
+	envCloudSDKConfig = "CLOUDSDK_CONFIG"
+	cloudPlatform     = "https://www.googleapis.com/auth/cloud-platform"
+	gcloudConfigDir   = "gcloud"
+	adcFilename       = "application_default_credentials.json"
+	revokeURL         = "https://oauth2.googleapis.com/revoke"
+	credTypeUser      = "authorized_user"
 )
 
-// loadAuthClient returns an *http.Client that authenticates with Google as the
-// signed-in user, refreshing the cached token automatically and injecting
-// X-Goog-User-Project on every outbound call when quotaProject is non-empty.
-//
-// On first run, the OAuth client ID/secret must be supplied via env vars
-// (GCP_OAUTH_CLIENT_ID / GCP_OAUTH_CLIENT_SECRET) and a browser consent screen
-// is opened. Subsequent runs reuse the cached token.
-func loadAuthClient(ctx context.Context, quotaProject string) (*http.Client, error) {
-	credsPath, err := credentialsPath()
-	if err != nil {
-		return nil, err
-	}
-
-	cfg, err := oauthConfigFromEnv()
-	if err != nil {
-		// If we have a cached token but no client ID/secret in env, we can
-		// still refresh it -- but only if the cache contains the config. We
-		// don't persist the secret, so a fresh env is required for both
-		// initial consent and refresh.
-		return nil, err
-	}
-
-	tok, err := readToken(credsPath)
-	if err != nil {
-		tok, err = runConsentFlow(ctx, cfg)
-		if err != nil {
-			return nil, fmt.Errorf("oauth flow failed: %w", err)
-		}
-		if writeErr := writeToken(credsPath, tok); writeErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not cache token at %s: %v\n", credsPath, writeErr)
-		}
-	}
-
-	source := &cachingTokenSource{
-		base:     cfg.TokenSource(ctx, tok),
-		path:     credsPath,
-		lastSeen: tok.AccessToken,
-	}
-
-	base := &oauth2.Transport{
-		Source: source,
-		Base:   http.DefaultTransport,
-	}
-
-	return &http.Client{
-		Transport: &userProjectTransport{
-			base:         base,
-			quotaProject: quotaProject,
-		},
-		Timeout: 60 * time.Second,
-	}, nil
+// adcFile is the gcloud Application Default Credentials JSON we share with
+// gcloud itself. We round-trip through a raw map so unknown gcloud-emitted
+// fields (`account`, `universe_domain`, ...) survive a write.
+type adcFile struct {
+	raw            map[string]json.RawMessage
+	Type           string
+	ClientID       string
+	ClientSecret   string
+	RefreshToken   string
+	QuotaProjectID string
 }
 
-func oauthConfigFromEnv() (*oauth2.Config, error) {
-	clientID := os.Getenv(envClientID)
-	clientSecret := os.Getenv(envClientSecret)
-	if clientID == "" || clientSecret == "" {
-		return nil, fmt.Errorf(
-			"OAuth credentials not configured. Set %s and %s in your environment "+
-				"(see README for how to obtain a desktop OAuth client)",
-			envClientID, envClientSecret,
-		)
+func parseADC(data []byte) (*adcFile, error) {
+	raw := map[string]json.RawMessage{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("malformed ADC JSON: %w", err)
 	}
-	return &oauth2.Config{
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		Endpoint:     google.Endpoint,
-		Scopes:       []string{cloudPlatform},
-		// RedirectURL is filled in at consent time once we know the port.
-	}, nil
+	f := &adcFile{raw: raw}
+	f.Type = jsonStringField(raw, "type")
+	f.ClientID = jsonStringField(raw, "client_id")
+	f.ClientSecret = jsonStringField(raw, "client_secret")
+	f.RefreshToken = jsonStringField(raw, "refresh_token")
+	f.QuotaProjectID = jsonStringField(raw, "quota_project_id")
+	return f, nil
 }
 
+func (f *adcFile) marshal() ([]byte, error) {
+	if f.raw == nil {
+		f.raw = map[string]json.RawMessage{}
+	}
+	setStringField(f.raw, "type", f.Type)
+	setStringField(f.raw, "client_id", f.ClientID)
+	setStringField(f.raw, "client_secret", f.ClientSecret)
+	setStringField(f.raw, "refresh_token", f.RefreshToken)
+	if f.QuotaProjectID == "" {
+		delete(f.raw, "quota_project_id")
+	} else {
+		setStringField(f.raw, "quota_project_id", f.QuotaProjectID)
+	}
+	return json.MarshalIndent(f.raw, "", "  ")
+}
+
+func jsonStringField(raw map[string]json.RawMessage, key string) string {
+	v, ok := raw[key]
+	if !ok {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(v, &s); err != nil {
+		return ""
+	}
+	return s
+}
+
+func setStringField(raw map[string]json.RawMessage, key, value string) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return
+	}
+	raw[key] = encoded
+}
+
+// credentialsPath returns the gcloud ADC path. CLOUDSDK_CONFIG overrides the
+// parent directory when set, matching gcloud's own behavior.
 func credentialsPath() (string, error) {
+	if cfg := os.Getenv(envCloudSDKConfig); cfg != "" {
+		return filepath.Join(cfg, adcFilename), nil
+	}
 	var base string
 	switch runtime.GOOS {
 	case "windows":
@@ -113,49 +113,244 @@ func credentialsPath() (string, error) {
 			base = filepath.Join(home, "AppData", "Roaming")
 		}
 	default:
-		// Honour XDG_CONFIG_HOME when set, fall back to ~/.config.
-		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-			base = xdg
-		} else {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return "", err
-			}
-			base = filepath.Join(home, ".config")
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
 		}
+		base = filepath.Join(home, ".config")
 	}
-	return filepath.Join(base, appConfigDir, credsFilename), nil
+	return filepath.Join(base, gcloudConfigDir, adcFilename), nil
 }
 
-func readToken(path string) (*oauth2.Token, error) {
+func readADC(path string) (*adcFile, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	tok := &oauth2.Token{}
-	if err := json.Unmarshal(data, tok); err != nil {
-		return nil, fmt.Errorf("malformed cached token: %w", err)
-	}
-	if tok.RefreshToken == "" && tok.AccessToken == "" {
-		return nil, errors.New("cached token is empty")
-	}
-	return tok, nil
+	return parseADC(data)
 }
 
-func writeToken(path string, tok *oauth2.Token) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+// writeADC persists the credentials atomically with mode 0600 and parent dir
+// 0700, matching gcloud's permissions on POSIX.
+func writeADC(path string, f *adcFile) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(tok, "", "  ")
+	data, err := f.marshal()
 	if err != nil {
 		return err
 	}
-	// 0600 -- it carries a refresh token.
-	return os.WriteFile(path, data, 0o600)
+
+	tmp, err := os.CreateTemp(dir, "."+adcFilename+".*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpPath) }
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil && runtime.GOOS != "windows" {
+		tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		cleanup()
+		return err
+	}
+	return nil
+}
+
+// buildAuthClient returns an *http.Client that uses the cached ADC token (or
+// runs the consent flow if no file exists) and injects X-Goog-User-Project on
+// every outbound call when quotaProject is non-empty.
+//
+// existing may be nil if no credentials file is present yet; the caller is
+// responsible for distinguishing missing-file from malformed-file.
+func buildAuthClient(ctx context.Context, adcPath string, existing *adcFile, quotaProject string) (*http.Client, error) {
+	creds := existing
+	if creds == nil || creds.RefreshToken == "" {
+		// No usable credentials -- need to run consent flow, which requires
+		// the env-supplied OAuth client id/secret.
+		cfg, err := oauthConfigFromEnv()
+		if err != nil {
+			return nil, fmt.Errorf(
+				"no credentials at %s.\n"+
+					"Run `gcloud auth application-default login` (preferred) to use the same\n"+
+					"token gcloud does, or set %s and %s in your environment to run this\n"+
+					"binary's own browser-based OAuth flow:\n"+
+					"  %s",
+				adcPath, envClientID, envClientSecret, err,
+			)
+		}
+		fresh, err := runConsentFlowAndPersist(ctx, cfg, adcPath, creds)
+		if err != nil {
+			return nil, fmt.Errorf("oauth flow failed: %w", err)
+		}
+		creds = fresh
+	}
+
+	if creds.Type != "" && creds.Type != credTypeUser {
+		return nil, fmt.Errorf(
+			"credentials file %s has type %q; this binary requires user credentials (type %q). "+
+				"Run `gcloud auth application-default login` or unset CLOUDSDK_CONFIG.",
+			adcPath, creds.Type, credTypeUser,
+		)
+	}
+	if creds.ClientID == "" || creds.ClientSecret == "" {
+		return nil, fmt.Errorf("credentials file %s is missing client_id/client_secret", adcPath)
+	}
+
+	// Use the standard helper to build the refreshing token source from the
+	// ADC bytes so we benefit from any future spec quirks the library handles.
+	bytes, err := creds.marshal()
+	if err != nil {
+		return nil, err
+	}
+	googleCreds, err := google.CredentialsFromJSON(ctx, bytes, cloudPlatform)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse credentials: %w", err)
+	}
+
+	src := &cachingADCTokenSource{
+		base:  googleCreds.TokenSource,
+		path:  adcPath,
+		state: *creds,
+	}
+
+	transport := &oauth2.Transport{
+		Source: src,
+		Base:   http.DefaultTransport,
+	}
+
+	return &http.Client{
+		Transport: &userProjectTransport{
+			base:         transport,
+			quotaProject: quotaProject,
+		},
+		Timeout: 60 * time.Second,
+	}, nil
+}
+
+// runLogout implements `--logout`: revoke the refresh token server-side via
+// https://oauth2.googleapis.com/revoke and delete the local credentials file.
+// Always exits 0; revoke failures are best-effort (matches gcloud).
+func runLogout(ctx context.Context) int {
+	path, err := credentialsPath()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Could not resolve credentials path: %v\n", err)
+		return 0
+	}
+
+	creds, err := readADC(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Println("Already logged out.")
+			return 0
+		}
+		// Malformed file -- still try to delete it to leave a clean slate.
+		fmt.Fprintf(os.Stderr, "Could not parse %s: %v\n", path, err)
+		_ = os.Remove(path)
+		fmt.Println("Logged out.")
+		return 0
+	}
+
+	if creds.RefreshToken == "" {
+		_ = os.Remove(path)
+		fmt.Println("Already logged out.")
+		return 0
+	}
+
+	revokeErr := revokeToken(ctx, creds.RefreshToken)
+
+	if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
+		fmt.Fprintf(os.Stderr, "Could not delete %s: %v\n", path, rmErr)
+	}
+
+	if revokeErr != nil {
+		fmt.Fprintf(os.Stderr, "Server-side revoke failed: %v\n", revokeErr)
+		fmt.Fprintln(os.Stderr, "Local credentials deleted.")
+		return 0
+	}
+	fmt.Println("Logged out.")
+	return 0
+}
+
+func revokeToken(ctx context.Context, token string) error {
+	body := url.Values{"token": []string{token}}.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, revokeURL, strings.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
+	return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
+}
+
+func oauthConfigFromEnv() (*oauth2.Config, error) {
+	clientID := os.Getenv(envClientID)
+	clientSecret := os.Getenv(envClientSecret)
+	if clientID == "" || clientSecret == "" {
+		return nil, fmt.Errorf(
+			"%s and %s are not set; cannot run consent flow without them",
+			envClientID, envClientSecret,
+		)
+	}
+	return &oauth2.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		Endpoint:     google.Endpoint,
+		Scopes:       []string{cloudPlatform},
+	}, nil
+}
+
+// runConsentFlowAndPersist runs the browser-based OAuth flow and writes the
+// resulting credentials in gcloud ADC format. existing (may be nil) is used
+// only to preserve fields we don't manage (e.g. quota_project_id, account).
+func runConsentFlowAndPersist(ctx context.Context, cfg *oauth2.Config, path string, existing *adcFile) (*adcFile, error) {
+	tok, err := runConsentFlow(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if tok.RefreshToken == "" {
+		return nil, errors.New("OAuth response did not include a refresh_token (try --logout and re-run)")
+	}
+
+	out := &adcFile{}
+	if existing != nil && existing.raw != nil {
+		out.raw = existing.raw
+		out.QuotaProjectID = existing.QuotaProjectID
+	}
+	out.Type = credTypeUser
+	out.ClientID = cfg.ClientID
+	out.ClientSecret = cfg.ClientSecret
+	out.RefreshToken = tok.RefreshToken
+
+	if err := writeADC(path, out); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not cache credentials at %s: %v\n", path, err)
+	}
+	return out, nil
 }
 
 func runConsentFlow(ctx context.Context, cfg *oauth2.Config) (*oauth2.Token, error) {
-	// Bind to a random local port so we can build an exact redirect URI.
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("could not start local listener: %w", err)
@@ -173,7 +368,7 @@ func runConsentFlow(ctx context.Context, cfg *oauth2.Config) (*oauth2.Token, err
 
 	authURL := cfg.AuthCodeURL(state,
 		oauth2.AccessTypeOffline,
-		oauth2.ApprovalForce, // force refresh_token issuance even on re-consent
+		oauth2.ApprovalForce,
 	)
 
 	type result struct {
@@ -259,33 +454,30 @@ const consentSuccessHTML = `<!doctype html>
 </head><body><div><h1>You're signed in</h1>
 <p>You can close this window and return to your terminal.</p></div></body></html>`
 
-// cachingTokenSource wraps an oauth2.TokenSource so that whenever the access
-// token is refreshed we persist the new bundle (refresh_token + access_token +
-// expiry) back to the credentials file.
-type cachingTokenSource struct {
-	base     oauth2.TokenSource
-	path     string
-	lastSeen string
+// cachingADCTokenSource persists a refreshed token back to the ADC file when
+// Google rotates the refresh_token. Access-token-only refreshes don't need to
+// touch the file.
+type cachingADCTokenSource struct {
+	base  oauth2.TokenSource
+	path  string
+	state adcFile
 }
 
-func (c *cachingTokenSource) Token() (*oauth2.Token, error) {
+func (c *cachingADCTokenSource) Token() (*oauth2.Token, error) {
 	tok, err := c.base.Token()
 	if err != nil {
 		return nil, err
 	}
-	if tok.AccessToken != c.lastSeen {
-		c.lastSeen = tok.AccessToken
-		if err := writeToken(c.path, tok); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not refresh cached token: %v\n", err)
+	if tok.RefreshToken != "" && tok.RefreshToken != c.state.RefreshToken {
+		c.state.RefreshToken = tok.RefreshToken
+		if err := writeADC(c.path, &c.state); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not persist rotated refresh token: %v\n", err)
 		}
 	}
 	return tok, nil
 }
 
-// userProjectTransport injects X-Goog-User-Project on every outbound call so
-// that user-credential API requests are billed against the configured quota
-// project instead of failing with "User project specified in the request is
-// invalid".
+// userProjectTransport injects X-Goog-User-Project on every outbound call.
 type userProjectTransport struct {
 	base         http.RoundTripper
 	quotaProject string
@@ -293,7 +485,6 @@ type userProjectTransport struct {
 
 func (t *userProjectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if t.quotaProject != "" && req.Header.Get("X-Goog-User-Project") == "" {
-		// Clone before mutating -- RoundTrippers must not modify the input.
 		clone := req.Clone(req.Context())
 		clone.Header.Set("X-Goog-User-Project", t.quotaProject)
 		req = clone

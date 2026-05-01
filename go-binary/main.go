@@ -55,6 +55,7 @@ type cliFlags struct {
 	stateFilter  []string
 	timezone     string
 	htmlFile     string
+	logout       bool
 }
 
 func main() {
@@ -64,22 +65,44 @@ func main() {
 		os.Exit(2)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if flags.logout {
+		os.Exit(runLogout(ctx))
+	}
+
 	loc, err := time.LoadLocation(flags.timezone)
 	if err != nil {
 		logf("Unknown timezone: %q. Use an IANA name like 'America/Los_Angeles' or 'UTC'.", flags.timezone)
 		os.Exit(2)
 	}
 
-	quotaProject, err := resolveQuotaProject(flags)
+	adcPath, err := credentialsPath()
+	if err != nil {
+		logf("Could not resolve credentials path: %v", err)
+		os.Exit(2)
+	}
+
+	// Read existing ADC if present so its quota_project_id can feed quota
+	// resolution. A missing file is fine -- we'll run consent flow later if
+	// quota resolution still succeeds.
+	existing, readErr := readADC(adcPath)
+	var adcQuota string
+	if readErr == nil && existing != nil {
+		adcQuota = existing.QuotaProjectID
+	} else if readErr != nil && !os.IsNotExist(readErr) {
+		logf("Warning: could not parse %s: %v", adcPath, readErr)
+		existing = nil
+	}
+
+	quotaProject, err := resolveQuotaProject(flags, adcQuota)
 	if err != nil {
 		logf("%s", err.Error())
 		os.Exit(2)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	httpClient, err := loadAuthClient(ctx, quotaProject)
+	httpClient, err := buildAuthClient(ctx, adcPath, existing, quotaProject)
 	if err != nil {
 		logf("Auth failed: %v", err)
 		os.Exit(2)
@@ -173,12 +196,13 @@ func parseFlags(argv []string) (cliFlags, error) {
 	}
 
 	var (
-		orgID        = fs.String("org-id", "", "GCP organization ID (numeric). Required.")
+		orgID        = fs.String("org-id", "", "GCP organization ID (numeric). Required (except with --logout).")
 		quotaProject = fs.String("quota-project", "", "Project to charge API quota against (env: "+envQuotaProject+").")
 		format       = fs.String("format", "table", "Output format: table | json | csv | html.")
 		workers      = fs.Int("workers", 10, "Max parallel workers for API calls.")
 		timezone     = fs.String("timezone", defaultTimezone, "IANA timezone for table timestamps. JSON/CSV keep raw ISO-8601.")
 		htmlFile     = fs.String("html-file", "", "Write HTML output to this file (only meaningful with --format html).")
+		logout       = fs.Bool("logout", false, "Revoke and delete the cached OAuth token, then exit.")
 	)
 
 	var (
@@ -198,8 +222,8 @@ func parseFlags(argv []string) (cliFlags, error) {
 		return cliFlags{}, err
 	}
 
-	if *orgID == "" {
-		fmt.Fprintln(os.Stderr, "error: --org-id is required")
+	if *orgID == "" && !*logout {
+		fmt.Fprintln(os.Stderr, "error: --org-id is required (unless --logout)")
 		fs.Usage()
 		return cliFlags{}, fmt.Errorf("missing --org-id")
 	}
@@ -223,6 +247,7 @@ func parseFlags(argv []string) (cliFlags, error) {
 		stateFilter:  []string(stateFilter),
 		timezone:     *timezone,
 		htmlFile:     *htmlFile,
+		logout:       *logout,
 	}, nil
 }
 
@@ -266,22 +291,27 @@ func expandRepeatedFlags(argv []string, names ...string) []string {
 // resolveQuotaProject walks the SPEC's resolution order:
 //  1. --quota-project flag
 //  2. GCP_QUOTA_PROJECT env var
-//  3. first --projects value
-//  4. otherwise, error out (org-wide discovery without a quota project)
-func resolveQuotaProject(f cliFlags) (string, error) {
+//  3. quota_project_id from the ADC file (set by
+//     `gcloud auth application-default set-quota-project`)
+//  4. first --projects value (auto-derive convenience)
+//  5. otherwise, error out (org-wide discovery without a quota project)
+func resolveQuotaProject(f cliFlags, adcQuota string) (string, error) {
 	if f.quotaProject != "" {
 		return f.quotaProject, nil
 	}
 	if env := os.Getenv(envQuotaProject); env != "" {
 		return env, nil
 	}
+	if adcQuota != "" {
+		return adcQuota, nil
+	}
 	if len(f.projects) > 0 {
 		return f.projects[0], nil
 	}
 	return "", fmt.Errorf("A quota project is required for org-wide project discovery.\n" +
-		"Pass --quota-project YOUR_PROJECT (a project you own that has the\n" +
-		"Service Usage API enabled), or restrict this run with --projects to\n" +
-		"auto-derive one from the list.")
+		"Pass --quota-project YOUR_PROJECT, or set one persistently with:\n" +
+		"    gcloud auth application-default set-quota-project YOUR_PROJECT\n" +
+		"Alternatively, restrict this run with --projects to auto-derive one from the list.")
 }
 
 func projectURL(project string) string {
