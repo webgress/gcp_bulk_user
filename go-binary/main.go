@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"html"
@@ -61,7 +62,12 @@ type cliFlags struct {
 func main() {
 	flags, err := parseFlags(os.Args[1:])
 	if err != nil {
-		// flag pkg already printed usage; just exit 2.
+		// `--help` is a documented success path -- the flag package prints
+		// usage and returns flag.ErrHelp; we exit 0 in that case so scripts
+		// (and our own release-workflow smoke test) don't see a failure.
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(0)
+		}
 		os.Exit(2)
 	}
 
