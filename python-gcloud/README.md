@@ -2,19 +2,83 @@
 
 Python CLI that queries Transfer Appliance status across every project in a GCP organization. Uses the v1 discovery API with a `gcloud alpha` fallback.
 
-## Install
+## Prerequisites
 
-You need **Python 3.10+** and the **Google Cloud SDK** on your PATH. Then:
+You need both of these on your `PATH` before installing:
+
+1. **Python 3.10 or newer** — verify with `python --version` (or `python3 --version`). Install from <https://www.python.org/downloads/> if missing.
+2. **Google Cloud SDK (`gcloud`)** — verify with `gcloud --version`. Install from <https://cloud.google.com/sdk/docs/install> if missing.
+
+No GitHub account, no `git`, and no compiled binaries are required. Everything below uses standard tools that are already approved on most corporate laptops (`curl`/`tar` on macOS/Linux, `Invoke-WebRequest`/`Expand-Archive` in PowerShell).
+
+## Install — macOS / Linux
 
 ```bash
-gcloud components install alpha
+# 1. Download the source tarball (no GitHub login required)
+curl -L -o gcp_bulk_user.tar.gz \
+  https://github.com/webgress/gcp_bulk_user/archive/refs/heads/main.tar.gz
+
+# 2. Extract and enter the python-gcloud directory
+tar -xzf gcp_bulk_user.tar.gz
+cd gcp_bulk_user-main/python-gcloud
+
+# 3. (Recommended) create an isolated virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# 4. Install Python dependencies
+pip install --upgrade pip
 pip install -r requirements.txt
+
+# 5. Make sure the gcloud alpha component is present
+gcloud components install alpha
+
+# 6. Authenticate. Say YES when asked to set a quota project, and pick a project you own.
 gcloud auth application-default login
 ```
 
-That's it — three commands.
+## Install — Windows (PowerShell)
 
-> **Important:** during `gcloud auth application-default login`, gcloud will ask whether to set a quota project. **Say yes** and pick a project you own. Without one, API calls fail with `User project specified in the request is invalid`. To change it later: `gcloud auth application-default set-quota-project YOUR_PROJECT`.
+```powershell
+# 1. Download the source zip
+Invoke-WebRequest `
+  -Uri "https://github.com/webgress/gcp_bulk_user/archive/refs/heads/main.zip" `
+  -OutFile "gcp_bulk_user.zip"
+
+# 2. Extract and enter the python-gcloud directory
+Expand-Archive -Path .\gcp_bulk_user.zip -DestinationPath .
+Set-Location .\gcp_bulk_user-main\python-gcloud
+
+# 3. (Recommended) create an isolated virtual environment
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+# 4. Install Python dependencies
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+
+# 5. Make sure the gcloud alpha component is present
+gcloud components install alpha
+
+# 6. Authenticate. Say YES when asked to set a quota project, and pick a project you own.
+gcloud auth application-default login
+```
+
+> **Important — quota project:** during `gcloud auth application-default login`, gcloud asks whether to set a quota project. **Say yes** and pick a project you own. Without one, API calls fail with `User project specified in the request is invalid`. To change it later:
+>
+> ```bash
+> gcloud auth application-default set-quota-project YOUR_PROJECT
+> ```
+
+## Verify the install
+
+From the `python-gcloud` directory (with the virtualenv active), run:
+
+```bash
+python -m gcp_appliance_status --help
+```
+
+You should see the CLI help text. If you get `ModuleNotFoundError`, your virtualenv isn't active or step 4 didn't complete.
 
 ## Grant IAM (one-time, at the org level)
 
@@ -29,6 +93,8 @@ gcloud organizations add-iam-policy-binding $ORG_ID --member="$MEMBER" --role="r
 If `roles/transferappliance.viewer` isn't available in your org yet, fall back to `roles/viewer` per project.
 
 ## Run
+
+Run from the `python-gcloud` directory with your virtualenv active.
 
 ```bash
 # Default: table output, every project in the org
@@ -63,6 +129,24 @@ Run `python -m gcp_appliance_status --help` for the full flag list.
 **"gcloud alpha not available"** — `gcloud components install alpha && gcloud components update`.
 
 **Persistent API errors after the above** — the Transfer Appliance API is in early access. Reach out to your Google Cloud support representative.
+
+**`ModuleNotFoundError: No module named 'gcp_appliance_status'`** — you're not inside the `python-gcloud` directory, or the virtualenv isn't active. Re-run `source .venv/bin/activate` (or `.\.venv\Scripts\Activate.ps1` on Windows) and try again.
+
+**`pip` or `python` not found** — Python isn't on your PATH. Reinstall from <https://www.python.org/downloads/> and tick "Add Python to PATH" during setup.
+
+## Updating to a newer version
+
+Re-run the download step and reinstall dependencies:
+
+```bash
+# macOS / Linux
+curl -L -o gcp_bulk_user.tar.gz \
+  https://github.com/webgress/gcp_bulk_user/archive/refs/heads/main.tar.gz
+tar -xzf gcp_bulk_user.tar.gz
+cd gcp_bulk_user-main/python-gcloud
+source .venv/bin/activate    # if you created one previously
+pip install -r requirements.txt
+```
 
 ## Other auth modes (CI / automation)
 
