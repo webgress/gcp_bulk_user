@@ -18,6 +18,10 @@ import (
 	"strings"
 	"time"
 
+	// Embeds the IANA timezone database into the binary. Required for
+	// time.LoadLocation to work on Windows, which has no /usr/share/zoneinfo.
+	_ "time/tzdata"
+
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
 )
