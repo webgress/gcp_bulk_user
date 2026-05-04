@@ -12,7 +12,35 @@ Behavior-equivalent with the [`python-gcloud`](../python-gcloud/) implementation
 
 ## Install
 
-Download one binary for your OS:
+The binary is pure Go — drop it on your `PATH` and run it. The only optional setup is provisioning credentials (see [Authentication](#authentication) below); a one-shot script that installs the Google Cloud SDK and runs `gcloud auth application-default login` is provided for convenience.
+
+### Step 1 — Provision credentials (one-shot)
+
+If you already use `gcloud auth application-default login`, skip this. Otherwise the easiest path on macOS / Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/webgress/gcp_bulk_user/main/go-binary/install.sh | bash
+```
+
+That script installs the Google Cloud SDK if missing and runs the auth flow. It does **not** download the binary itself — that's step 2.
+
+To inspect first:
+
+```bash
+curl -fsSL -o install.sh https://raw.githubusercontent.com/webgress/gcp_bulk_user/main/go-binary/install.sh
+less install.sh
+bash install.sh
+```
+
+Windows (PowerShell 5.1+):
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/webgress/gcp_bulk_user/main/go-binary/install.ps1 | iex
+```
+
+If execution policy blocks the script: `powershell -ExecutionPolicy Bypass -File .\install.ps1`. To inspect first, download with `iwr -OutFile install.ps1 ...` and open in Notepad before running.
+
+### Step 2 — Download the binary
 
 ```bash
 # macOS (Apple Silicon)

@@ -2,83 +2,49 @@
 
 Python CLI that queries Transfer Appliance status across every project in a GCP organization. Uses the v1 discovery API with a `gcloud alpha` fallback.
 
-## Prerequisites
+## Install (macOS / Linux)
 
-You need both of these on your `PATH` before installing:
-
-1. **Python 3.10 or newer** — verify with `python --version` (or `python3 --version`). Install from <https://www.python.org/downloads/> if missing.
-2. **Google Cloud SDK (`gcloud`)** — verify with `gcloud --version`. Install from <https://cloud.google.com/sdk/docs/install> if missing.
-
-No GitHub account, no `git`, and no compiled binaries are required. Everything below uses standard tools that are already approved on most corporate laptops (`curl`/`tar` on macOS/Linux, `Invoke-WebRequest`/`Expand-Archive` in PowerShell).
-
-## Install — macOS / Linux
+One command. The script downloads the source, installs the Google Cloud SDK if missing, creates a virtualenv, installs Python deps, and runs `gcloud auth application-default login`. Re-run it any time to refresh.
 
 ```bash
-# 1. Download the source tarball (no GitHub login required)
-curl -L -o gcp_bulk_user.tar.gz \
-  https://github.com/webgress/gcp_bulk_user/archive/refs/heads/main.tar.gz
-
-# 2. Extract and enter the python-gcloud directory
-tar -xzf gcp_bulk_user.tar.gz
-cd gcp_bulk_user-main/python-gcloud
-
-# 3. (Recommended) create an isolated virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# 4. Install Python dependencies
-pip install --upgrade pip
-pip install -r requirements.txt
-
-# 5. Make sure the gcloud alpha component is present
-gcloud components install alpha
-
-# 6. Authenticate. Say YES when asked to set a quota project, and pick a project you own.
-gcloud auth application-default login
+curl -fsSL https://raw.githubusercontent.com/webgress/gcp_bulk_user/main/python-gcloud/install.sh | bash
 ```
 
-## Install — Windows (PowerShell)
+Prefer to read it before running? Same script, two-step:
+
+```bash
+curl -fsSL -o install.sh https://raw.githubusercontent.com/webgress/gcp_bulk_user/main/python-gcloud/install.sh
+less install.sh        # inspect
+bash install.sh
+```
+
+**Only prerequisite:** Python 3.10 or newer (`python3 --version`). Install from <https://www.python.org/downloads/> if missing. The script handles everything else.
+
+When the script reaches the auth step, gcloud asks whether to set a quota project — **say yes** and pick a project you own. Without one, API calls fail with `User project specified in the request is invalid`. To change later: `gcloud auth application-default set-quota-project YOUR_PROJECT`.
+
+After it finishes, the script prints the exact next command to run.
+
+## Install (Windows, PowerShell 5.1+)
 
 ```powershell
-# 1. Download the source zip
-Invoke-WebRequest `
-  -Uri "https://github.com/webgress/gcp_bulk_user/archive/refs/heads/main.zip" `
-  -OutFile "gcp_bulk_user.zip"
-
-# 2. Extract and enter the python-gcloud directory
-Expand-Archive -Path .\gcp_bulk_user.zip -DestinationPath .
-Set-Location .\gcp_bulk_user-main\python-gcloud
-
-# 3. (Recommended) create an isolated virtual environment
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-
-# 4. Install Python dependencies
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-
-# 5. Make sure the gcloud alpha component is present
-gcloud components install alpha
-
-# 6. Authenticate. Say YES when asked to set a quota project, and pick a project you own.
-gcloud auth application-default login
+iwr -useb https://raw.githubusercontent.com/webgress/gcp_bulk_user/main/python-gcloud/install.ps1 | iex
 ```
 
-> **Important — quota project:** during `gcloud auth application-default login`, gcloud asks whether to set a quota project. **Say yes** and pick a project you own. Without one, API calls fail with `User project specified in the request is invalid`. To change it later:
->
-> ```bash
-> gcloud auth application-default set-quota-project YOUR_PROJECT
-> ```
+To inspect first:
 
-## Verify the install
-
-From the `python-gcloud` directory (with the virtualenv active), run:
-
-```bash
-python -m gcp_appliance_status --help
+```powershell
+iwr -useb -OutFile install.ps1 https://raw.githubusercontent.com/webgress/gcp_bulk_user/main/python-gcloud/install.ps1
+notepad install.ps1
+.\install.ps1
 ```
 
-You should see the CLI help text. If you get `ModuleNotFoundError`, your virtualenv isn't active or step 4 didn't complete.
+If execution policy blocks the script:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+**Only prerequisite:** Python 3.10 or newer (`python --version`). Install from <https://www.python.org/downloads/> and tick "Add Python to PATH" during setup. The script handles everything else (gcloud SDK, virtualenv, deps, auth).
 
 ## Grant IAM (one-time, at the org level)
 
@@ -136,16 +102,61 @@ Run `python -m gcp_appliance_status --help` for the full flag list.
 
 ## Updating to a newer version
 
-Re-run the download step and reinstall dependencies:
+Re-run the installer:
 
 ```bash
-# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/webgress/gcp_bulk_user/main/python-gcloud/install.sh | bash
+```
+
+It re-downloads the source and reinstalls Python dependencies. Existing gcloud install and credentials are reused.
+
+## Manual install (fallback)
+
+If you can't or don't want to run the script — Windows users, or anyone who prefers explicit steps — do the following.
+
+### macOS / Linux
+
+```bash
+# 1. Install gcloud SDK if missing: https://cloud.google.com/sdk/docs/install
+gcloud components install alpha
+
+# 2. Download source (no GitHub login)
 curl -L -o gcp_bulk_user.tar.gz \
   https://github.com/webgress/gcp_bulk_user/archive/refs/heads/main.tar.gz
 tar -xzf gcp_bulk_user.tar.gz
 cd gcp_bulk_user-main/python-gcloud
-source .venv/bin/activate    # if you created one previously
+
+# 3. Virtualenv + deps
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
 pip install -r requirements.txt
+
+# 4. Auth (say YES to quota project, pick one you own)
+gcloud auth application-default login
+```
+
+### Windows (PowerShell)
+
+```powershell
+# 1. Install gcloud SDK if missing: https://cloud.google.com/sdk/docs/install
+gcloud components install alpha
+
+# 2. Download source zip
+Invoke-WebRequest `
+  -Uri "https://github.com/webgress/gcp_bulk_user/archive/refs/heads/main.zip" `
+  -OutFile "gcp_bulk_user.zip"
+Expand-Archive -Path .\gcp_bulk_user.zip -DestinationPath .
+Set-Location .\gcp_bulk_user-main\python-gcloud
+
+# 3. Virtualenv + deps
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+
+# 4. Auth (say YES to quota project, pick one you own)
+gcloud auth application-default login
 ```
 
 ## Other auth modes (CI / automation)
