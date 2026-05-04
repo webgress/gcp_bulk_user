@@ -42,6 +42,8 @@ If execution policy blocks the script: `powershell -ExecutionPolicy Bypass -File
 
 ### Step 2 — Download the binary
 
+**macOS / Linux:**
+
 ```bash
 # macOS (Apple Silicon)
 curl -L -o gcp-appliance-status \
@@ -53,6 +55,19 @@ curl -L -o gcp-appliance-status \
   https://github.com/webgress/gcp_bulk_user/releases/latest/download/gcp-appliance-status-linux-amd64
 chmod +x gcp-appliance-status
 ```
+
+**Windows (PowerShell):**
+
+```powershell
+Invoke-WebRequest `
+  -Uri  "https://github.com/webgress/gcp_bulk_user/releases/latest/download/gcp-appliance-status-windows-amd64.exe" `
+  -OutFile "gcp-appliance-status.exe"
+
+# Run it
+.\gcp-appliance-status.exe --org-id YOUR_ORG_ID
+```
+
+To make it callable from any directory, move it to a folder on your `PATH` (e.g. create `C:\Tools\` and add it to your user PATH via *Environment Variables → Edit user PATH*).
 
 Build targets shipped in each release:
 
