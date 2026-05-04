@@ -76,9 +76,7 @@ chmod +x gcp-appliance-status
 **Windows (PowerShell):**
 
 ```powershell
-Invoke-WebRequest `
-  -Uri  "https://github.com/webgress/gcp_bulk_user/releases/latest/download/gcp-appliance-status-windows-amd64.exe" `
-  -OutFile "gcp-appliance-status.exe"
+Invoke-WebRequest  -Uri  "https://github.com/webgress/gcp_bulk_user/releases/latest/download/gcp-appliance-status-windows-amd64.exe" -OutFile "gcp-appliance-status.exe"
 
 # Run it
 .\gcp-appliance-status.exe --org-id YOUR_ORG_ID
