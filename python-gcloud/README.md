@@ -38,11 +38,33 @@ notepad install.ps1
 .\install.ps1
 ```
 
-If execution policy blocks the script:
+### "running scripts is disabled on this system"
+
+That's PowerShell's **execution policy** blocking local `.ps1` files — a default Windows safety setting, not a permissions problem. Pick one workaround:
+
+**1. One-shot, no policy change** (recommended for a one-time install):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
+
+**2. Allow scripts in just the current PowerShell window:**
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\install.ps1
+```
+
+**3. Allow scripts permanently for your user account** (no admin required):
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+.\install.ps1
+```
+
+`RemoteSigned` is the standard developer setting: local scripts run, downloaded scripts must be signed.
+
+**4. Or skip the file entirely** — the `iwr | iex` one-liner above bypasses execution policy because it evaluates the script in-memory rather than from a file.
 
 **Only prerequisite:** Python 3.10 or newer (`python --version`). Install from <https://www.python.org/downloads/> and tick "Add Python to PATH" during setup. The script handles everything else (gcloud SDK, virtualenv, deps, auth).
 

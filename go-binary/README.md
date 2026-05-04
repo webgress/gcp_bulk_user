@@ -38,7 +38,24 @@ Windows (PowerShell 5.1+):
 iwr -useb https://raw.githubusercontent.com/webgress/gcp_bulk_user/main/go-binary/install.ps1 | iex
 ```
 
-If execution policy blocks the script: `powershell -ExecutionPolicy Bypass -File .\install.ps1`. To inspect first, download with `iwr -OutFile install.ps1 ...` and open in Notepad before running.
+To inspect first, download with `iwr -OutFile install.ps1 ...` and open in Notepad before running.
+
+**"running scripts is disabled on this system"** — that's PowerShell's execution policy blocking local `.ps1` files (default Windows safety setting, not a permissions problem). Pick one:
+
+```powershell
+# 1. One-shot, no policy change:
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+
+# 2. Allow scripts in just this PowerShell window:
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\install.ps1
+
+# 3. Allow scripts permanently for your user account (no admin required):
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+.\install.ps1
+```
+
+The `iwr | iex` one-liner above bypasses execution policy entirely because it runs the script in-memory rather than from a file.
 
 ### Step 2 — Download the binary
 
