@@ -24,49 +24,97 @@ When the script reaches the auth step, gcloud asks whether to set a quota projec
 
 After it finishes, the script prints the exact next command to run.
 
-## Install (Windows, PowerShell 5.1+)
+## Install — Windows (recommended)
+
+Uses Google's official, code-signed installer (signed by **Google LLC**), which most corporate antivirus / endpoint protection allow. ~10 minutes total. **Do not** use Python from the Microsoft Store — its sandbox redirects writes under `%APPDATA%`, which silently breaks the credential hand-off.
+
+### Step 1 — Install the Google Cloud SDK
+
+1. Download: <https://dl.google.com/dl/cloudsdk/channels/rapid/GoogleCloudSDKInstaller.exe>
+2. Double-click `GoogleCloudSDKInstaller.exe`.
+3. Click **Next** through the wizard. Accept the defaults — *Single user*, **Bundled Python** (important — avoids the Store-Python trap), *Add gcloud to PATH*.
+4. Leave **"Run gcloud init"** checked and click **Finish**. A blue *Google Cloud SDK Shell* window opens automatically.
+
+### Step 2 — Install Python 3.10+
+
+1. Download: <https://www.python.org/downloads/>
+2. Run the installer. **Tick "Add python.exe to PATH"** at the bottom of the first screen.
+3. Click **Install Now** and accept defaults.
+
+### Step 3 — Authenticate
+
+In the Cloud SDK Shell from Step 1 (or open it later from **Start → Google Cloud SDK Shell**):
+
+```cmd
+gcloud auth application-default login
+```
+
+Sign in in the browser, click **Allow**. When asked *"Do you want to set a quota project?"*, type **`y`** and pick a project you own.
+
+The last line should be:
+
+```
+Credentials saved to file: [C:\Users\<you>\AppData\Roaming\gcloud\application_default_credentials.json]
+```
+
+### Step 4 — Download and install the tool
+
+In the Cloud SDK Shell:
+
+```cmd
+curl -L -o gcp_bulk_user.zip https://github.com/webgress/gcp_bulk_user/archive/refs/heads/main.zip
+tar -xf gcp_bulk_user.zip
+cd gcp_bulk_user-main\python-gcloud
+
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+
+gcloud components install alpha
+```
+
+(Both `curl` and `tar` are bundled with Windows 10 1803+ and the Cloud SDK Shell.)
+
+### Step 5 — Run
+
+```cmd
+python -m gcp_appliance_status --org-id YOUR_ORG_ID
+```
+
+You should see a table of Transfer Appliance status. Subsequent runs only need:
+
+```cmd
+cd %USERPROFILE%\gcp_bulk_user-main\python-gcloud
+.venv\Scripts\activate
+python -m gcp_appliance_status --org-id YOUR_ORG_ID
+```
+
+### Troubleshooting (Windows)
+
+**`User project specified in the request is invalid`** — re-run `gcloud auth application-default set-quota-project YOUR_PROJECT`.
+
+**`ModuleNotFoundError: No module named 'gcp_appliance_status'`** — the virtualenv isn't active. Run `.venv\Scripts\activate` from the `python-gcloud` directory.
+
+**No `gcloud` directory in `%APPDATA%` after running auth** — you ran `gcloud` from Microsoft Store Python. Find the misplaced credentials:
+```powershell
+Get-ChildItem "$env:LOCALAPPDATA\Packages\PythonSoftwareFoundation.*" -Recurse -Filter "application_default_credentials.json" -ErrorAction SilentlyContinue
+```
+Uninstall Store Python (or open the Cloud SDK Shell *fresh*, which uses bundled Python) and re-run `gcloud auth application-default login`.
+
+## Install — Windows (advanced, scripted)
+
+> **Not recommended for non-technical users.** Uses a PowerShell script + the gcloud zip distribution rather than Google's signed installer. Known to fail when the user has Microsoft Store Python on PATH (the Store sandbox redirects gcloud's writes under `%APPDATA%`, breaking the credential hand-off). Prefer the [recommended Windows flow](#install--windows-recommended) above.
 
 ```powershell
 iwr -useb https://raw.githubusercontent.com/webgress/gcp_bulk_user/main/python-gcloud/install.ps1 | iex
 ```
 
-To inspect first:
-
-```powershell
-iwr -useb -OutFile install.ps1 https://raw.githubusercontent.com/webgress/gcp_bulk_user/main/python-gcloud/install.ps1
-notepad install.ps1
-.\install.ps1
-```
-
-### "running scripts is disabled on this system"
-
-That's PowerShell's **execution policy** blocking local `.ps1` files — a default Windows safety setting, not a permissions problem. Pick one workaround:
-
-**1. One-shot, no policy change** (recommended for a one-time install):
+If execution policy blocks the script:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
-
-**2. Allow scripts in just the current PowerShell window:**
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\install.ps1
-```
-
-**3. Allow scripts permanently for your user account** (no admin required):
-
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
-.\install.ps1
-```
-
-`RemoteSigned` is the standard developer setting: local scripts run, downloaded scripts must be signed.
-
-**4. Or skip the file entirely** — the `iwr | iex` one-liner above bypasses execution policy because it evaluates the script in-memory rather than from a file.
-
-**Only prerequisite:** Python 3.10 or newer (`python --version`). Install from <https://www.python.org/downloads/> and tick "Add Python to PATH" during setup. The script handles everything else (gcloud SDK, virtualenv, deps, auth).
 
 ## Grant IAM (one-time, at the org level)
 

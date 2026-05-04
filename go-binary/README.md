@@ -10,19 +10,78 @@ Behavior-equivalent with the [`python-gcloud`](../python-gcloud/) implementation
 - If you log in via this binary first, subsequent gcloud commands use the same token.
 - `gcp-appliance-status --logout` and `gcloud auth application-default revoke` are interchangeable.
 
-## Install
+## Install — Windows (recommended)
 
-The binary is pure Go — drop it on your `PATH` and run it. The only optional setup is provisioning credentials (see [Authentication](#authentication) below); a one-shot script that installs the Google Cloud SDK and runs `gcloud auth application-default login` is provided for convenience.
+Uses Google's official, code-signed installer (signed by **Google LLC**), which most corporate antivirus / endpoint protection allow because of the signature. ~5 minutes. **Do not** use Python from the Microsoft Store — it sandboxes filesystem writes under `%APPDATA%`, which silently breaks the credential hand-off between gcloud and this binary.
+
+### Step 1 — Install the Google Cloud SDK
+
+1. Download the installer:
+   <https://dl.google.com/dl/cloudsdk/channels/rapid/GoogleCloudSDKInstaller.exe>
+2. Double-click `GoogleCloudSDKInstaller.exe`.
+3. Click **Next** through the wizard. Accept the defaults — *Single user*, *Bundled Python* (important: this avoids the Store-Python sandbox), *Add gcloud to PATH*.
+4. At the end, leave **"Run gcloud init"** checked and click **Finish**. A blue *Google Cloud SDK Shell* window opens automatically.
+
+### Step 2 — Authenticate
+
+In the Cloud SDK Shell that just opened (or open it later from **Start → Google Cloud SDK Shell**), run:
+
+```cmd
+gcloud auth application-default login
+```
+
+A browser opens. Sign in with the Google account that has access to your GCP organization, click **Allow**, then return to the terminal.
+
+When prompted *"Do you want to set a quota project?"*, type **`y`** and pick a project you own. (Without one, API calls fail with `User project specified in the request is invalid`.)
+
+The last line should read:
+
+```
+Credentials saved to file: [C:\Users\<you>\AppData\Roaming\gcloud\application_default_credentials.json]
+```
+
+### Step 3 — Download the binary
+
+In the same Cloud SDK Shell window:
+
+```cmd
+curl -L -o gcp-appliance-status.exe https://github.com/webgress/gcp_bulk_user/releases/latest/download/gcp-appliance-status-windows-amd64.exe
+```
+
+(The Cloud SDK Shell ships with `curl`. If you'd rather use a browser: open <https://github.com/webgress/gcp_bulk_user/releases/latest>, download `gcp-appliance-status-windows-amd64.exe`, and rename it to `gcp-appliance-status.exe`.)
+
+### Step 4 — Run
+
+```cmd
+gcp-appliance-status.exe --org-id YOUR_ORG_ID
+```
+
+You should see a table of Transfer Appliance status across every project in your org.
+
+### Troubleshooting (Windows)
+
+**`auth failed: no credentials at C:\Users\<you>\AppData\Roaming\gcloud\application_default_credentials.json`** — the file genuinely isn't there. Most common causes:
+
+1. You ran `gcloud` from a Python install other than the SDK's bundled one (especially Microsoft Store Python). Fix: uninstall Store Python (or use a fresh install via the SDK installer above) and re-run `gcloud auth application-default login`. Find the misplaced file with:
+   ```powershell
+   Get-ChildItem "$env:LOCALAPPDATA\Packages\PythonSoftwareFoundation.*" -Recurse -Filter "application_default_credentials.json" -ErrorAction SilentlyContinue
+   ```
+   If anything turns up there, that's the sandbox issue.
+2. The browser tab was closed before consent finished. Re-run the auth command.
+
+**`gcp-appliance-status` works only in the Cloud SDK Shell, not regular CMD/PowerShell** — the SDK Shell sets up environment variables. To use it from anywhere, move the .exe to a folder already on your PATH (e.g. `C:\Windows\System32\` or your own `C:\Tools\` plus a user-PATH update via *Settings → System → About → Advanced system settings → Environment Variables*).
+
+## Install — macOS / Linux
+
+The binary is pure Go — drop it on your `PATH` and run it. The only setup is provisioning credentials; a one-shot script handles that.
 
 ### Step 1 — Provision credentials (one-shot)
 
-If you already use `gcloud auth application-default login`, skip this. Otherwise the easiest path on macOS / Linux:
+If you already use `gcloud auth application-default login`, skip this:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/webgress/gcp_bulk_user/main/go-binary/install.sh | bash
 ```
-
-That script installs the Google Cloud SDK if missing and runs the auth flow. It does **not** download the binary itself — that's step 2.
 
 To inspect first:
 
@@ -32,34 +91,7 @@ less install.sh
 bash install.sh
 ```
 
-Windows (PowerShell 5.1+):
-
-```powershell
-iwr -useb https://raw.githubusercontent.com/webgress/gcp_bulk_user/main/go-binary/install.ps1 | iex
-```
-
-To inspect first, download with `iwr -OutFile install.ps1 ...` and open in Notepad before running.
-
-**"running scripts is disabled on this system"** — that's PowerShell's execution policy blocking local `.ps1` files (default Windows safety setting, not a permissions problem). Pick one:
-
-```powershell
-# 1. One-shot, no policy change:
-powershell -ExecutionPolicy Bypass -File .\install.ps1
-
-# 2. Allow scripts in just this PowerShell window:
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\install.ps1
-
-# 3. Allow scripts permanently for your user account (no admin required):
-Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
-.\install.ps1
-```
-
-The `iwr | iex` one-liner above bypasses execution policy entirely because it runs the script in-memory rather than from a file.
-
 ### Step 2 — Download the binary
-
-**macOS / Linux:**
 
 ```bash
 # macOS (Apple Silicon)
@@ -73,16 +105,15 @@ curl -L -o gcp-appliance-status \
 chmod +x gcp-appliance-status
 ```
 
-**Windows (PowerShell):**
+## Install — Windows (advanced, scripted)
+
+> **Not recommended for non-technical users.** Uses a PowerShell script + the gcloud zip distribution rather than Google's signed installer. Known to fail when the user has Microsoft Store Python on PATH (the Store sandbox redirects gcloud's writes under `%APPDATA%`, breaking the credential hand-off). Prefer the [recommended Windows flow](#install--windows-recommended) above.
 
 ```powershell
-Invoke-WebRequest  -Uri  "https://github.com/webgress/gcp_bulk_user/releases/latest/download/gcp-appliance-status-windows-amd64.exe" -OutFile "gcp-appliance-status.exe"
-
-# Run it
-.\gcp-appliance-status.exe --org-id YOUR_ORG_ID
+iwr -useb https://raw.githubusercontent.com/webgress/gcp_bulk_user/main/go-binary/install.ps1 | iex
 ```
 
-To make it callable from any directory, move it to a folder on your `PATH` (e.g. create `C:\Tools\` and add it to your user PATH via *Environment Variables → Edit user PATH*).
+If execution policy blocks the script: `powershell -ExecutionPolicy Bypass -File .\install.ps1` (or use the `iwr | iex` one-liner above, which evaluates in-memory and bypasses execution policy entirely).
 
 Build targets shipped in each release:
 
