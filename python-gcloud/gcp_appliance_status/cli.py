@@ -948,7 +948,23 @@ def build_html_report(
     const projSortButtons = Array.from(document.querySelectorAll("[data-proj-sort]"));
 
     function projUrl(projectId) {{
-      return `https://pantheon.corp.google.com/appliances?project=${{encodeURIComponent(projectId)}}`;
+      // Deep-link into Metrics Explorer pre-filled with the same metric the
+      // report aggregates: storage/total_bytes summed across the project.
+      const pageState = {{
+        xyChart: {{
+          dataSets: [{{
+            timeSeriesFilter: {{
+              filter: 'metric.type="storage.googleapis.com/storage/total_bytes" resource.type="gcs_bucket"',
+              minAlignmentPeriod: "86400s",
+              perSeriesAligner: "ALIGN_MAX",
+              crossSeriesReducer: "REDUCE_SUM",
+            }},
+            plotType: "LINE",
+          }}],
+        }},
+      }};
+      const encoded = encodeURIComponent(JSON.stringify(pageState));
+      return `https://pantheon.corp.google.com/monitoring/metrics-explorer?project=${{encodeURIComponent(projectId)}}&pageState=${{encoded}}`;
     }}
 
     function getFilteredProjects() {{
