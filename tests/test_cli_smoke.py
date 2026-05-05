@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from gcp_appliance_status import cli
 from gcp_appliance_status.appliances import (
@@ -18,6 +18,10 @@ from gcp_appliance_status.appliances import (
     _parse_resource_name,
     get_all_appliances,
     get_appliances_for_project,
+)
+from gcp_appliance_status.storage import (
+    ProjectStorageResult,
+    get_storage_for_project,
 )
 
 
@@ -65,18 +69,20 @@ class CliSmokeTests(unittest.TestCase):
 
         code, out, _ = run_cli(["--org-id", "999", "--format", "json"], scan_results)
         parsed = json.loads(out)
+        appliances = parsed["appliances"]
 
         self.assertEqual(code, 0)
-        self.assertEqual(parsed[0]["appliance_id"], "appliance-123")
-        self.assertEqual(parsed[0]["state"], "ACTIVE")
+        self.assertIn("projects", parsed)
+        self.assertEqual(appliances[0]["appliance_id"], "appliance-123")
+        self.assertEqual(appliances[0]["state"], "ACTIVE")
         self.assertEqual(
-            parsed[0]["project_url"],
-            "https://pantheon.corp.google.com/home/dashboard?project=p1",
+            appliances[0]["project_url"],
+            "https://pantheon.corp.google.com/appliances?project=p1",
         )
         self.assertEqual(
-            parsed[0]["appliance_url"],
+            appliances[0]["appliance_url"],
             "https://pantheon.corp.google.com/appliances/us-central1/"
-            "appliance-123;tab=configuration?project=p1",
+            "appliance-123/details;tab=configuration?project=p1",
         )
 
     def test_state_filter_is_case_insensitive(self) -> None:
@@ -99,10 +105,11 @@ class CliSmokeTests(unittest.TestCase):
             scan_results,
         )
         parsed = json.loads(out)
+        appliances = parsed["appliances"]
 
         self.assertEqual(code, 0)
-        self.assertEqual(len(parsed), 1)
-        self.assertEqual(parsed[0]["appliance_id"], "a1")
+        self.assertEqual(len(appliances), 1)
+        self.assertEqual(appliances[0]["appliance_id"], "a1")
 
     def test_csv_output_uses_appliance_id_contract(self) -> None:
         scan_results = ScanResults(
@@ -126,10 +133,10 @@ class CliSmokeTests(unittest.TestCase):
             "project,project_url,appliance_id,appliance_url,model,state,create_time,update_time",
             out,
         )
-        self.assertIn("https://pantheon.corp.google.com/home/dashboard?project=p1", out)
+        self.assertIn("https://pantheon.corp.google.com/appliances?project=p1", out)
         self.assertIn(
-            "https://pantheon.corp.google.com/home/dashboard?project=p1,"
-            "a1,https://pantheon.corp.google.com/home/dashboard?project=p1,TA40,ACTIVE,t1,t2",
+            "https://pantheon.corp.google.com/appliances?project=p1,"
+            "a1,https://pantheon.corp.google.com/appliances?project=p1,TA40,ACTIVE,t1,t2",
             out,
         )
 
@@ -150,9 +157,10 @@ class CliSmokeTests(unittest.TestCase):
 
         code, out, err = run_cli(["--org-id", "999", "--format", "json"], scan_results)
         parsed = json.loads(out)
+        appliances = parsed["appliances"]
 
         self.assertEqual(code, 2)
-        self.assertEqual(len(parsed), 1)
+        self.assertEqual(len(appliances), 1)
         self.assertIn("results may be incomplete", err)
         self.assertIn("p2: 403 from API and gcloud", err)
 
@@ -239,7 +247,7 @@ class CliSmokeTests(unittest.TestCase):
         self.assertIn("\x1b]8;", rendered)
         self.assertIn(
             "https://pantheon.corp.google.com/appliances/us-central1/"
-            "appliance-xyz;tab=configuration?project=proj-123",
+            "appliance-xyz/details;tab=configuration?project=proj-123",
             rendered,
         )
 
@@ -282,10 +290,10 @@ class CliSmokeTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertIn('<script id="report-data" type="application/json">', out)
-        self.assertIn('"project_url": "https://pantheon.corp.google.com/home/dashboard?project=p1"', out)
+        self.assertIn('"project_url": "https://pantheon.corp.google.com/appliances?project=p1"', out)
         self.assertIn(
             '"appliance_url": "https://pantheon.corp.google.com/appliances/us-central1/'
-            'appliance-123;tab=configuration?project=p1"',
+            'appliance-123/details;tab=configuration?project=p1"',
             out,
         )
         self.assertIn('<button data-sort="model">Model</button>', out)
@@ -316,8 +324,8 @@ class CliSmokeTests(unittest.TestCase):
             self.assertEqual(out, "")
             self.assertIn(f"Wrote HTML report to {report_path}", err)
             content = report_path.read_text(encoding="utf-8")
-            self.assertIn("Transfer Appliance Status - org 999", content)
-            self.assertIn('"project_url": "https://pantheon.corp.google.com/home/dashboard?project=p1"', content)
+            self.assertIn("Transfer Appliance Report — org 999", content)
+            self.assertIn('"project_url": "https://pantheon.corp.google.com/appliances?project=p1"', content)
 
     def test_html_without_file_writes_tmp_and_opens_when_interactive(self) -> None:
         class TtyStringIO(io.StringIO):
@@ -372,13 +380,13 @@ class ApplianceHelpersTests(unittest.TestCase):
         self.assertEqual(
             cli._appliance_url("proj-123", "us-central1", "appliance-xyz"),
             ("https://pantheon.corp.google.com/appliances/us-central1/"
-             "appliance-xyz;tab=configuration?project=proj-123"),
+             "appliance-xyz/details;tab=configuration?project=proj-123"),
         )
 
     def test_project_url_matches_pantheon_format(self) -> None:
         self.assertEqual(
             cli._project_url("proj-123"),
-            "https://pantheon.corp.google.com/home/dashboard?project=proj-123",
+            "https://pantheon.corp.google.com/appliances?project=proj-123",
         )
 
     def test_falls_back_to_gcloud_on_api_error(self) -> None:
@@ -511,6 +519,334 @@ class ApplianceHelpersTests(unittest.TestCase):
 
         self.assertEqual(len(result.appliances), 1)
         self.assertEqual(mocked.call_count, 1)
+
+
+def _appliance(project: str, state: str, appliance_id: str = "a1") -> dict:
+    """Helper for building a normalized appliance dict in tests."""
+    return {
+        "project": project,
+        "name": f"projects/{project}/locations/us-central1/appliances/{appliance_id}",
+        "state": state,
+        "model": "TA40",
+        "create_time": "2026-01-01T00:00:00Z",
+        "update_time": "2026-01-02T00:00:00Z",
+        "appliance_id": appliance_id,
+        "location": "us-central1",
+    }
+
+
+class BuildProjectSummariesTests(unittest.TestCase):
+    """_build_project_summaries() decides active vs inactive per project."""
+
+    def test_active_when_appliance_is_on_site(self) -> None:
+        appliances = [_appliance("p1", "ON_SITE")]
+        summaries = cli._build_project_summaries(appliances, {}, ["p1"])
+
+        self.assertEqual(summaries["p1"]["status"], "active")
+        self.assertEqual(summaries["p1"]["appliance_count"], 1)
+        self.assertEqual(summaries["p1"]["appliance_states"], ["ON_SITE"])
+
+    def test_active_when_wiped_but_storage_present(self) -> None:
+        appliances = [_appliance("p1", "WIPED")]
+        storage_results = {
+            "p1": ProjectStorageResult(project="p1", current_bytes=1024),
+        }
+        summaries = cli._build_project_summaries(appliances, storage_results, ["p1"])
+
+        self.assertEqual(summaries["p1"]["status"], "active")
+        self.assertEqual(summaries["p1"]["appliance_count"], 1)
+        self.assertEqual(summaries["p1"]["storage"]["current_bytes"], 1024)
+
+    def test_inactive_when_wiped_with_no_storage(self) -> None:
+        appliances = [_appliance("p1", "WIPED")]
+        storage_results = {
+            "p1": ProjectStorageResult(project="p1", current_bytes=0),
+        }
+        summaries = cli._build_project_summaries(appliances, storage_results, ["p1"])
+
+        self.assertEqual(summaries["p1"]["status"], "inactive")
+        self.assertEqual(summaries["p1"]["appliance_count"], 1)
+        self.assertEqual(summaries["p1"]["storage"]["current_bytes"], 0)
+
+    def test_inactive_when_no_appliances_and_no_storage(self) -> None:
+        # No appliance entries, and either no storage record at all or one
+        # whose current_bytes is 0 — both should yield "inactive".
+        summaries = cli._build_project_summaries([], {}, ["p1"])
+
+        self.assertEqual(summaries["p1"]["status"], "inactive")
+        self.assertEqual(summaries["p1"]["appliance_count"], 0)
+        self.assertEqual(summaries["p1"]["appliance_states"], [])
+        self.assertIsNone(summaries["p1"]["storage"])
+
+
+class BuildHtmlReportTests(unittest.TestCase):
+    """build_html_report embeds the new {appliances, projects} payload."""
+
+    def test_html_contains_projects_view_markers_and_dual_keys(self) -> None:
+        appliances = [_appliance("p1", "ON_SITE")]
+        project_summaries = {
+            "p1": {
+                "status": "active",
+                "appliance_count": 1,
+                "appliance_states": ["ON_SITE"],
+                "storage": {
+                    "current_bytes": 2048,
+                    "high_watermark_bytes": 4096,
+                    "fill_date": "2026-01-01T00:00:00Z",
+                    "empty_date": None,
+                    "bucket_count": 3,
+                    "error": None,
+                },
+            },
+        }
+
+        html_doc = cli.build_html_report(
+            appliances, project_summaries, "999", "America/Los_Angeles",
+        )
+
+        # Projects view markup is present.
+        self.assertIn("view-projects", html_doc)
+        self.assertIn("status-filter-btn", html_doc)
+        self.assertIn("proj-rows", html_doc)
+
+        # Embedded JSON has both top-level keys.
+        marker = '<script id="report-data" type="application/json">'
+        start = html_doc.index(marker) + len(marker)
+        end = html_doc.index("</script>", start)
+        embedded = json.loads(html_doc[start:end])
+        self.assertIn("appliances", embedded)
+        self.assertIn("projects", embedded)
+        self.assertEqual(embedded["appliances"][0]["appliance_id"], "a1")
+        self.assertEqual(embedded["projects"]["p1"]["status"], "active")
+
+
+class ProjectStorageResultTests(unittest.TestCase):
+    """Smoke tests for the storage.ProjectStorageResult dataclass."""
+
+    def test_minimum_construction_uses_zero_defaults(self) -> None:
+        result = ProjectStorageResult(project="p1")
+
+        self.assertEqual(result.project, "p1")
+        self.assertEqual(result.bucket_count, 0)
+        self.assertEqual(result.current_bytes, 0)
+        self.assertEqual(result.high_watermark_bytes, 0)
+        self.assertIsNone(result.fill_date)
+        self.assertIsNone(result.empty_date)
+        self.assertIsNone(result.error)
+
+    def test_full_construction_keeps_all_fields(self) -> None:
+        result = ProjectStorageResult(
+            project="p1",
+            bucket_count=2,
+            current_bytes=100,
+            high_watermark_bytes=500,
+            fill_date="2026-01-01T00:00:00Z",
+            empty_date="2026-04-01T00:00:00Z",
+            error=None,
+        )
+
+        self.assertEqual(result.bucket_count, 2)
+        self.assertEqual(result.current_bytes, 100)
+        self.assertEqual(result.high_watermark_bytes, 500)
+        self.assertEqual(result.fill_date, "2026-01-01T00:00:00Z")
+        self.assertEqual(result.empty_date, "2026-04-01T00:00:00Z")
+
+
+class NoStorageFlagTests(unittest.TestCase):
+    """--no-storage must skip get_all_storage entirely."""
+
+    def test_no_storage_flag_skips_get_all_storage(self) -> None:
+        scan_results = ScanResults(
+            appliances=[_appliance("p1", "ON_SITE")],
+            errors=[],
+        )
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch(
+            "gcp_appliance_status.cli.list_org_projects",
+            return_value=[{"project_id": "p1", "name": "P1", "state": "ACTIVE"}],
+        ), patch(
+            "gcp_appliance_status.cli.get_all_appliances",
+            return_value=scan_results,
+        ), patch(
+            "gcp_appliance_status.cli.get_all_storage",
+        ) as mocked_storage, patch.object(
+            sys,
+            "argv",
+            ["gcp_appliance_status", "--org-id", "999", "--format", "json",
+             "--no-storage"],
+        ), redirect_stdout(stdout), redirect_stderr(stderr):
+            try:
+                cli.main()
+            except SystemExit:
+                pass
+
+        # The whole point of --no-storage: skip the storage query entirely.
+        self.assertEqual(mocked_storage.call_count, 0)
+
+        # And the JSON payload still has both keys, with a storage=None summary.
+        parsed = json.loads(stdout.getvalue())
+        self.assertEqual(parsed["projects"]["p1"]["storage"], None)
+
+
+class FakeResponse:
+    """Minimal stand-in for a requests.Response from AuthorizedSession.get."""
+
+    def __init__(self, status_code: int, payload: dict | None = None,
+                 text: str = "") -> None:
+        self.status_code = status_code
+        self._payload = payload if payload is not None else {}
+        self.text = text
+
+    def json(self) -> dict:
+        return self._payload
+
+
+def _route_session_get(routes: dict[str, list]):
+    """Return a side_effect that picks a response based on which URL is hit.
+
+    routes maps a substring (e.g. "storage.googleapis.com") to a list of
+    FakeResponse objects, consumed in order on each matching call.
+    """
+
+    def _side_effect(url, *args, **kwargs):
+        for needle, responses in routes.items():
+            if needle in url:
+                if not responses:
+                    raise AssertionError(
+                        f"No more fake responses queued for URL containing {needle!r}"
+                    )
+                return responses.pop(0)
+        raise AssertionError(f"Unexpected URL in test: {url}")
+
+    return _side_effect
+
+
+class StorageApiTests(unittest.TestCase):
+    """Mock AuthorizedSession.get to verify storage.py behaviour."""
+
+    def _patch_session(self):
+        """Patch _make_session to return (session_mock, headers_dict)."""
+
+        class _SessionMock:
+            def __init__(self) -> None:
+                self.get = None  # populated per test
+
+        session_mock = _SessionMock()
+        return session_mock, patch(
+            "gcp_appliance_status.storage._make_session",
+            return_value=(session_mock, {}),
+        )
+
+    def test_fill_date_picks_oldest_bucket_time_created(self) -> None:
+        session_mock, session_patch = self._patch_session()
+
+        # Two buckets — the older timeCreated should be picked as fill_date.
+        bucket_resp = FakeResponse(200, {
+            "items": [
+                {"name": "bucket-new", "timeCreated": "2026-03-01T00:00:00Z"},
+                {"name": "bucket-old", "timeCreated": "2025-12-01T00:00:00Z"},
+            ],
+        })
+        # Empty time series — focus this test on fill_date only.
+        ts_resp = FakeResponse(200, {"timeSeries": []})
+
+        session_mock.get = MagicMock(  # type: ignore[attr-defined]
+            side_effect=_route_session_get({
+                "storage.googleapis.com": [bucket_resp],
+                "monitoring.googleapis.com": [ts_resp],
+            }),
+        )
+
+        with session_patch:
+            result = get_storage_for_project("p1")
+
+        self.assertEqual(result.fill_date, "2025-12-01T00:00:00Z")
+        self.assertEqual(result.bucket_count, 2)
+        self.assertIsNone(result.error)
+
+    def test_high_watermark_sums_across_buckets_and_classes(self) -> None:
+        session_mock, session_patch = self._patch_session()
+
+        bucket_resp = FakeResponse(200, {
+            "items": [{"name": "b1", "timeCreated": "2026-01-01T00:00:00Z"}],
+        })
+        # Two time series (e.g. bucket × storage class), two timestamps each.
+        # At t1: 100 + 50 = 150 ; at t2: 200 + 300 = 500.
+        # high_watermark_bytes should be 500, current_bytes (last) also 500.
+        ts_resp = FakeResponse(200, {
+            "timeSeries": [
+                {
+                    "points": [
+                        {"interval": {"endTime": "2026-04-01T00:00:00Z"},
+                         "value": {"int64Value": "100"}},
+                        {"interval": {"endTime": "2026-04-02T00:00:00Z"},
+                         "value": {"int64Value": "200"}},
+                    ],
+                },
+                {
+                    "points": [
+                        {"interval": {"endTime": "2026-04-01T00:00:00Z"},
+                         "value": {"int64Value": "50"}},
+                        {"interval": {"endTime": "2026-04-02T00:00:00Z"},
+                         "value": {"int64Value": "300"}},
+                    ],
+                },
+            ],
+        })
+
+        session_mock.get = MagicMock(  # type: ignore[attr-defined]
+            side_effect=_route_session_get({
+                "storage.googleapis.com": [bucket_resp],
+                "monitoring.googleapis.com": [ts_resp],
+            }),
+        )
+
+        with session_patch:
+            result = get_storage_for_project("p1")
+
+        self.assertEqual(result.high_watermark_bytes, 500)
+        self.assertEqual(result.current_bytes, 500)
+        # Storage never dropped to zero, so empty_date remains None.
+        self.assertIsNone(result.empty_date)
+
+    def test_empty_date_set_when_storage_drops_to_zero(self) -> None:
+        session_mock, session_patch = self._patch_session()
+
+        bucket_resp = FakeResponse(200, {
+            "items": [{"name": "b1", "timeCreated": "2026-01-01T00:00:00Z"}],
+        })
+        # Storage was 1000, then 500, then 0 — empty_date should be the
+        # timestamp of the first zero point and current_bytes should be 0.
+        ts_resp = FakeResponse(200, {
+            "timeSeries": [
+                {
+                    "points": [
+                        {"interval": {"endTime": "2026-04-01T00:00:00Z"},
+                         "value": {"int64Value": "1000"}},
+                        {"interval": {"endTime": "2026-04-02T00:00:00Z"},
+                         "value": {"int64Value": "500"}},
+                        {"interval": {"endTime": "2026-04-03T00:00:00Z"},
+                         "value": {"int64Value": "0"}},
+                    ],
+                },
+            ],
+        })
+
+        session_mock.get = MagicMock(  # type: ignore[attr-defined]
+            side_effect=_route_session_get({
+                "storage.googleapis.com": [bucket_resp],
+                "monitoring.googleapis.com": [ts_resp],
+            }),
+        )
+
+        with session_patch:
+            result = get_storage_for_project("p1")
+
+        self.assertEqual(result.current_bytes, 0)
+        self.assertEqual(result.high_watermark_bytes, 1000)
+        self.assertEqual(result.empty_date, "2026-04-03T00:00:00Z")
 
 
 if __name__ == "__main__":
