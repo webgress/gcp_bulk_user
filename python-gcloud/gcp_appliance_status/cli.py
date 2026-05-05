@@ -8,7 +8,7 @@ import html
 import json
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote, urlencode
@@ -20,7 +20,7 @@ from rich.text import Text
 
 from .appliances import get_all_appliances
 from .projects import list_org_projects
-from .storage import ProjectStorageResult, get_all_storage
+from .storage import LOOKBACK_DAYS, ProjectStorageResult, get_all_storage
 
 DEFAULT_TZ = "America/Los_Angeles"  # PST/PDT, handles DST automatically.
 
@@ -269,7 +269,15 @@ def build_html_report(
     org_id: str,
     tz_name: str,
 ) -> str:
-    report_data = {"appliances": appliances, "projects": project_summaries}
+    storage_window_start = (
+        datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
+    ).isoformat()
+    report_data = {
+        "appliances": appliances,
+        "projects": project_summaries,
+        "storage_window_start": storage_window_start,
+        "storage_window_days": LOOKBACK_DAYS,
+    }
     report_json = json.dumps(report_data, indent=2).replace("</", "<\\/")
     generated_at = datetime.now().astimezone().isoformat(timespec="seconds")
     title = "Transfer Appliance Report"
@@ -709,6 +717,8 @@ def build_html_report(
     const reportData = JSON.parse(document.getElementById("report-data").textContent);
     const appliances = reportData.appliances || [];
     const projectSummaries = reportData.projects || {{}};
+    const storageWindowStart = reportData.storage_window_start || null;
+    const storageWindowDays = reportData.storage_window_days || 0;
 
     const rowsEl = document.getElementById("rows");
     const totalsEl = document.getElementById("totals");
@@ -1004,7 +1014,19 @@ def build_html_report(
         const storHWM = storage.high_watermark_bytes
           ? formatBytes(storage.high_watermark_bytes)
           : "—";
-        const fillStr = storage.fill_date ? formatTime(storage.fill_date) : "—";
+        let fillStr;
+        if (storage.fill_date) {{
+          fillStr = formatTime(storage.fill_date);
+        }} else if ((storage.high_watermark_bytes || 0) > 0 || (storage.current_bytes || 0) > 0) {{
+          // Data was already present at the start of the monitoring window —
+          // we can't tell exactly when it rose, so anchor to the lookback edge.
+          const tip = `Storage was already non-zero ${{storageWindowDays}} days ago; ` +
+                      `actual fill date is unknown.`;
+          const anchor = storageWindowStart ? formatTime(storageWindowStart) : "the lookback window";
+          fillStr = `<em title="${{escapeHtml(tip)}}" style="color:var(--muted);cursor:help">before ${{anchor}}</em>`;
+        }} else {{
+          fillStr = "—";
+        }}
         let emptyStr;
         if (storage.empty_date) {{
           emptyStr = formatTime(storage.empty_date);

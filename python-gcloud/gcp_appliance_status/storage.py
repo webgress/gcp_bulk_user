@@ -22,7 +22,7 @@ import google.auth
 from google.auth.transport.requests import AuthorizedSession
 
 _MON_URL = "https://monitoring.googleapis.com/v3/projects/{project}/timeSeries"
-_LOOKBACK_DAYS = 45  # Cloud Monitoring retains hourly GCS samples ~6 weeks.
+LOOKBACK_DAYS = 45  # Cloud Monitoring retains hourly GCS samples ~6 weeks.
 
 
 def _log(msg: str) -> None:
@@ -59,7 +59,7 @@ def _get_project_storage_series(
     so the server returns one series for the whole project.
     """
     end_time = datetime.now(timezone.utc)
-    start_time = end_time - timedelta(days=_LOOKBACK_DAYS)
+    start_time = end_time - timedelta(days=LOOKBACK_DAYS)
     params: dict = {
         "filter": 'metric.type="storage.googleapis.com/storage/total_bytes"',
         "interval.startTime": start_time.isoformat(),
