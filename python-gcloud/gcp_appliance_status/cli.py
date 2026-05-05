@@ -170,7 +170,6 @@ def _build_project_summaries(
                 "high_watermark_bytes": storage.high_watermark_bytes,
                 "fill_date": storage.fill_date,
                 "empty_date": storage.empty_date,
-                "bucket_count": storage.bucket_count,
                 "error": storage.error,
             }
 

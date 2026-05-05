@@ -594,7 +594,6 @@ class BuildHtmlReportTests(unittest.TestCase):
                     "high_watermark_bytes": 4096,
                     "fill_date": "2026-01-01T00:00:00Z",
                     "empty_date": None,
-                    "bucket_count": 3,
                     "error": None,
                 },
             },
@@ -627,7 +626,6 @@ class ProjectStorageResultTests(unittest.TestCase):
         result = ProjectStorageResult(project="p1")
 
         self.assertEqual(result.project, "p1")
-        self.assertEqual(result.bucket_count, 0)
         self.assertEqual(result.current_bytes, 0)
         self.assertEqual(result.high_watermark_bytes, 0)
         self.assertIsNone(result.fill_date)
@@ -637,7 +635,6 @@ class ProjectStorageResultTests(unittest.TestCase):
     def test_full_construction_keeps_all_fields(self) -> None:
         result = ProjectStorageResult(
             project="p1",
-            bucket_count=2,
             current_bytes=100,
             high_watermark_bytes=500,
             fill_date="2026-01-01T00:00:00Z",
@@ -645,7 +642,6 @@ class ProjectStorageResultTests(unittest.TestCase):
             error=None,
         )
 
-        self.assertEqual(result.bucket_count, 2)
         self.assertEqual(result.current_bytes, 100)
         self.assertEqual(result.high_watermark_bytes, 500)
         self.assertEqual(result.fill_date, "2026-01-01T00:00:00Z")
@@ -724,7 +720,12 @@ def _route_session_get(routes: dict[str, list]):
 
 
 class StorageApiTests(unittest.TestCase):
-    """Mock AuthorizedSession.get to verify storage.py behaviour."""
+    """Mock AuthorizedSession.get to verify storage.py behaviour.
+
+    storage.py now does ONE aggregated monitoring call per project — no
+    bucket-list traffic — and the returned series is already summed
+    server-side via crossSeriesReducer=REDUCE_SUM.
+    """
 
     def _patch_session(self):
         """Patch _make_session to return (session_mock, headers_dict)."""
@@ -739,22 +740,50 @@ class StorageApiTests(unittest.TestCase):
             return_value=(session_mock, {}),
         )
 
-    def test_fill_date_picks_oldest_bucket_time_created(self) -> None:
+    def test_request_uses_cross_series_sum_aggregation(self) -> None:
         session_mock, session_patch = self._patch_session()
-
-        # Two buckets — the older timeCreated should be picked as fill_date.
-        bucket_resp = FakeResponse(200, {
-            "items": [
-                {"name": "bucket-new", "timeCreated": "2026-03-01T00:00:00Z"},
-                {"name": "bucket-old", "timeCreated": "2025-12-01T00:00:00Z"},
-            ],
-        })
-        # Empty time series — focus this test on fill_date only.
         ts_resp = FakeResponse(200, {"timeSeries": []})
-
         session_mock.get = MagicMock(  # type: ignore[attr-defined]
             side_effect=_route_session_get({
-                "storage.googleapis.com": [bucket_resp],
+                "monitoring.googleapis.com": [ts_resp],
+            }),
+        )
+
+        with session_patch:
+            get_storage_for_project("p1")
+
+        # Exactly one HTTP call (no bucket list) and it must aggregate
+        # cross-series so we get one project-wide series back.
+        self.assertEqual(session_mock.get.call_count, 1)
+        _, kwargs = session_mock.get.call_args
+        params = kwargs.get("params", {})
+        self.assertEqual(params.get("aggregation.crossSeriesReducer"), "REDUCE_SUM")
+        self.assertEqual(params.get("aggregation.perSeriesAligner"), "ALIGN_MAX")
+        self.assertIn(
+            'metric.type="storage.googleapis.com/storage/total_bytes"',
+            params.get("filter", ""),
+        )
+
+    def test_high_watermark_picks_max_from_aggregated_series(self) -> None:
+        session_mock, session_patch = self._patch_session()
+        # Server has already summed across buckets — we get one series back.
+        # Daily peak: 150, 500, 300 → high_watermark = 500, current = 300.
+        ts_resp = FakeResponse(200, {
+            "timeSeries": [
+                {
+                    "points": [
+                        {"interval": {"endTime": "2026-04-01T00:00:00Z"},
+                         "value": {"int64Value": "150"}},
+                        {"interval": {"endTime": "2026-04-02T00:00:00Z"},
+                         "value": {"int64Value": "500"}},
+                        {"interval": {"endTime": "2026-04-03T00:00:00Z"},
+                         "value": {"int64Value": "300"}},
+                    ],
+                },
+            ],
+        })
+        session_mock.get = MagicMock(  # type: ignore[attr-defined]
+            side_effect=_route_session_get({
                 "monitoring.googleapis.com": [ts_resp],
             }),
         )
@@ -762,19 +791,50 @@ class StorageApiTests(unittest.TestCase):
         with session_patch:
             result = get_storage_for_project("p1")
 
-        self.assertEqual(result.fill_date, "2025-12-01T00:00:00Z")
-        self.assertEqual(result.bucket_count, 2)
-        self.assertIsNone(result.error)
+        self.assertEqual(result.high_watermark_bytes, 500)
+        self.assertEqual(result.current_bytes, 300)
+        # Storage never dropped to zero, so empty_date remains None.
+        self.assertIsNone(result.empty_date)
 
-    def test_high_watermark_sums_across_buckets_and_classes(self) -> None:
+    def test_fill_date_set_on_first_zero_to_nonzero_transition(self) -> None:
         session_mock, session_patch = self._patch_session()
-
-        bucket_resp = FakeResponse(200, {
-            "items": [{"name": "b1", "timeCreated": "2026-01-01T00:00:00Z"}],
+        # Goes 0 -> 0 -> 500 -> 0 -> 200. fill_date = first non-zero observed
+        # after a zero, i.e. 2026-04-03.
+        ts_resp = FakeResponse(200, {
+            "timeSeries": [
+                {
+                    "points": [
+                        {"interval": {"endTime": "2026-04-01T00:00:00Z"},
+                         "value": {"int64Value": "0"}},
+                        {"interval": {"endTime": "2026-04-02T00:00:00Z"},
+                         "value": {"int64Value": "0"}},
+                        {"interval": {"endTime": "2026-04-03T00:00:00Z"},
+                         "value": {"int64Value": "500"}},
+                        {"interval": {"endTime": "2026-04-04T00:00:00Z"},
+                         "value": {"int64Value": "0"}},
+                        {"interval": {"endTime": "2026-04-05T00:00:00Z"},
+                         "value": {"int64Value": "200"}},
+                    ],
+                },
+            ],
         })
-        # Two time series (e.g. bucket × storage class), two timestamps each.
-        # At t1: 100 + 50 = 150 ; at t2: 200 + 300 = 500.
-        # high_watermark_bytes should be 500, current_bytes (last) also 500.
+        session_mock.get = MagicMock(  # type: ignore[attr-defined]
+            side_effect=_route_session_get({
+                "monitoring.googleapis.com": [ts_resp],
+            }),
+        )
+
+        with session_patch:
+            result = get_storage_for_project("p1")
+
+        self.assertEqual(result.fill_date, "2026-04-03T00:00:00Z")
+        self.assertEqual(result.current_bytes, 200)
+        self.assertEqual(result.high_watermark_bytes, 500)
+
+    def test_fill_date_none_when_data_present_from_window_start(self) -> None:
+        session_mock, session_patch = self._patch_session()
+        # Always non-zero — we never observe a 0 -> non-zero transition,
+        # so we don't know when it actually rose.
         ts_resp = FakeResponse(200, {
             "timeSeries": [
                 {
@@ -785,20 +845,10 @@ class StorageApiTests(unittest.TestCase):
                          "value": {"int64Value": "200"}},
                     ],
                 },
-                {
-                    "points": [
-                        {"interval": {"endTime": "2026-04-01T00:00:00Z"},
-                         "value": {"int64Value": "50"}},
-                        {"interval": {"endTime": "2026-04-02T00:00:00Z"},
-                         "value": {"int64Value": "300"}},
-                    ],
-                },
             ],
         })
-
         session_mock.get = MagicMock(  # type: ignore[attr-defined]
             side_effect=_route_session_get({
-                "storage.googleapis.com": [bucket_resp],
                 "monitoring.googleapis.com": [ts_resp],
             }),
         )
@@ -806,17 +856,10 @@ class StorageApiTests(unittest.TestCase):
         with session_patch:
             result = get_storage_for_project("p1")
 
-        self.assertEqual(result.high_watermark_bytes, 500)
-        self.assertEqual(result.current_bytes, 500)
-        # Storage never dropped to zero, so empty_date remains None.
-        self.assertIsNone(result.empty_date)
+        self.assertIsNone(result.fill_date)
 
     def test_empty_date_set_when_storage_drops_to_zero(self) -> None:
         session_mock, session_patch = self._patch_session()
-
-        bucket_resp = FakeResponse(200, {
-            "items": [{"name": "b1", "timeCreated": "2026-01-01T00:00:00Z"}],
-        })
         # Storage was 1000, then 500, then 0 — empty_date should be the
         # timestamp of the first zero point and current_bytes should be 0.
         ts_resp = FakeResponse(200, {
@@ -833,10 +876,8 @@ class StorageApiTests(unittest.TestCase):
                 },
             ],
         })
-
         session_mock.get = MagicMock(  # type: ignore[attr-defined]
             side_effect=_route_session_get({
-                "storage.googleapis.com": [bucket_resp],
                 "monitoring.googleapis.com": [ts_resp],
             }),
         )
