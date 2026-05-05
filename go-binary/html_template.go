@@ -473,6 +473,7 @@ const htmlReportTemplate = `<!doctype html>
     }
 
     function renderRows() {
+      updateSortButtons();
       const rows = getFilteredRows();
       rowsEl.innerHTML = "";
 
