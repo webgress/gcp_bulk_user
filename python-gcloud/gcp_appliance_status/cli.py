@@ -962,6 +962,7 @@ def build_html_report(
             plotType: "LINE",
           }}],
         }},
+        timeSelection: {{ timeRange: "6w" }},
       }};
       const encoded = encodeURIComponent(JSON.stringify(pageState));
       return `https://pantheon.corp.google.com/monitoring/metrics-explorer?project=${{encodeURIComponent(projectId)}}&pageState=${{encoded}}`;
