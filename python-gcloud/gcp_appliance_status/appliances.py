@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -16,6 +17,10 @@ import google.auth
 from google.auth.transport.requests import AuthorizedSession
 
 TA_BASE_URL = "https://transferappliance.googleapis.com/v1alpha1"
+
+
+def _log(msg: str) -> None:
+    print(msg, file=sys.stderr, flush=True)
 
 
 @dataclass
@@ -57,28 +62,42 @@ def _get_appliances_via_api(project_id: str) -> tuple[list[dict] | None, str | N
         headers["X-Goog-User-Project"] = quota_project
 
     url = f"{TA_BASE_URL}/projects/{project_id}/locations/-/appliances"
+    _log(f"[appliances] {project_id}: GET transferappliance.googleapis.com")
+    t0 = time.monotonic()
     try:
         response = session.get(url, headers=headers, timeout=30)
     except Exception as e:
+        _log(f"[appliances] {project_id}: ERROR {type(e).__name__} after "
+             f"{time.monotonic() - t0:.2f}s")
         return None, f"[api] {project_id}: {type(e).__name__}: {e}"
 
+    elapsed = time.monotonic() - t0
     if response.status_code == 200:
         try:
             payload = response.json()
         except ValueError as e:
+            _log(f"[appliances] {project_id}: HTTP 200 but invalid JSON in "
+                 f"{elapsed:.2f}s")
             return None, f"[api] {project_id}: invalid JSON: {e}"
         appliances = payload.get("appliances", [])
         if not isinstance(appliances, list):
+            _log(f"[appliances] {project_id}: HTTP 200 but malformed payload in "
+                 f"{elapsed:.2f}s")
             return None, (f"[api] {project_id}: invalid payload: "
                           "'appliances' must be a list")
+        _log(f"[appliances] {project_id}: HTTP 200 ({len(appliances)} appliance(s)) "
+             f"in {elapsed:.2f}s")
         return appliances, None
 
+    _log(f"[appliances] {project_id}: HTTP {response.status_code} in {elapsed:.2f}s")
     body = response.text[:200].replace("\n", " ")
     return None, f"[api] {project_id}: HTTP {response.status_code} {body}"
 
 
 def _get_appliances_via_gcloud(project_id: str) -> tuple[list[dict] | None, str | None]:
     """Fallback: fetch appliances using gcloud alpha CLI."""
+    _log(f"[appliances] {project_id}: fallback to gcloud alpha transfer appliances")
+    t0 = time.monotonic()
     try:
         result = subprocess.run(
             [
@@ -87,17 +106,28 @@ def _get_appliances_via_gcloud(project_id: str) -> tuple[list[dict] | None, str 
             ],
             capture_output=True, text=True, timeout=30,
         )
+        elapsed = time.monotonic() - t0
         if result.returncode != 0:
+            _log(f"[appliances] {project_id}: gcloud rc={result.returncode} in "
+                 f"{elapsed:.2f}s")
             return None, (f"[gcloud] {project_id}: rc={result.returncode} "
                           f"{result.stderr.strip()}")
         if not result.stdout.strip():
+            _log(f"[appliances] {project_id}: gcloud returned 0 appliances in "
+                 f"{elapsed:.2f}s")
             return [], None
 
         payload = json.loads(result.stdout)
         if not isinstance(payload, list):
+            _log(f"[appliances] {project_id}: gcloud returned non-list payload in "
+                 f"{elapsed:.2f}s")
             return None, f"[gcloud] {project_id}: invalid payload: expected a list"
+        _log(f"[appliances] {project_id}: gcloud returned {len(payload)} appliance(s) "
+             f"in {elapsed:.2f}s")
         return payload, None
     except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as e:
+        _log(f"[appliances] {project_id}: gcloud {type(e).__name__} after "
+             f"{time.monotonic() - t0:.2f}s")
         return None, f"[gcloud] {project_id}: {type(e).__name__}: {e}"
 
 
@@ -199,12 +229,17 @@ def get_all_appliances(project_ids: list[str], max_workers: int = 10) -> ScanRes
     project_ids = list(dict.fromkeys(project_ids))
     all_appliances = []
     errors = []
+    total = len(project_ids)
+    _log(f"[appliances] starting appliance queries for {total} project(s) "
+         f"(max_workers={max_workers})")
+    t_start = time.monotonic()
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_project = {
             executor.submit(get_appliances_for_project, pid): pid
             for pid in project_ids
         }
+        done = 0
         for future in as_completed(future_to_project):
             project_id = future_to_project[future]
             try:
@@ -215,8 +250,11 @@ def get_all_appliances(project_ids: list[str], max_workers: int = 10) -> ScanRes
             except Exception as e:
                 message = str(e)
                 errors.append({"project": project_id, "error": message})
-                print(f"Warning: failed to query project {project_id}: {e}",
-                      file=sys.stderr)
+                _log(f"Warning: failed to query project {project_id}: {e}")
+            done += 1
+            _log(f"[appliances] progress {done}/{total} (last: {project_id})")
+    _log(f"[appliances] all appliance queries done in "
+         f"{time.monotonic() - t_start:.2f}s")
 
     all_appliances.sort(key=lambda appliance: (
         appliance.get("project", ""),

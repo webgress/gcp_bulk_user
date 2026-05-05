@@ -13,6 +13,7 @@ Required IAM roles (in addition to existing appliance roles):
 from __future__ import annotations
 
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,10 @@ from google.auth.transport.requests import AuthorizedSession
 _GCS_URL = "https://storage.googleapis.com/storage/v1/b"
 _MON_URL = "https://monitoring.googleapis.com/v3/projects/{project}/timeSeries"
 _LOOKBACK_DAYS = 45  # Cloud Monitoring retains ~6 weeks of hourly GCS metrics
+
+
+def _log(msg: str) -> None:
+    print(msg, file=sys.stderr, flush=True)
 
 
 @dataclass
@@ -58,23 +63,40 @@ def _list_buckets(
         "maxResults": "200",
     }
     buckets: list[dict] = []
+    page = 0
     while True:
+        page += 1
+        _log(f"[storage] {project_id}: GET storage.googleapis.com buckets page {page}")
+        t0 = time.monotonic()
         try:
             resp = session.get(_GCS_URL, params=params, headers=headers, timeout=30)
         except Exception as e:
+            _log(f"[storage] {project_id}: buckets ERROR {type(e).__name__} after "
+                 f"{time.monotonic() - t0:.2f}s")
             return buckets, f"buckets: {type(e).__name__}: {e}"
+        elapsed = time.monotonic() - t0
         if resp.status_code == 403:
+            _log(f"[storage] {project_id}: buckets HTTP 403 in {elapsed:.2f}s")
             return [], "buckets: permission denied (HTTP 403)"
         if resp.status_code == 404:
+            _log(f"[storage] {project_id}: buckets HTTP 404 (GCS not enabled) in "
+                 f"{elapsed:.2f}s")
             return [], None  # GCS API not enabled; not an error
         if resp.status_code != 200:
+            _log(f"[storage] {project_id}: buckets HTTP {resp.status_code} in "
+                 f"{elapsed:.2f}s")
             snippet = resp.text[:120].replace("\n", " ")
             return buckets, f"buckets: HTTP {resp.status_code} {snippet}"
         try:
             data = resp.json()
         except ValueError as e:
+            _log(f"[storage] {project_id}: buckets HTTP 200 but invalid JSON in "
+                 f"{elapsed:.2f}s")
             return buckets, f"buckets: invalid JSON: {e}"
-        buckets.extend(data.get("items", []))
+        items = data.get("items", [])
+        buckets.extend(items)
+        _log(f"[storage] {project_id}: buckets page {page} returned {len(items)} "
+             f"in {elapsed:.2f}s (total {len(buckets)})")
         next_page = data.get("nextPageToken")
         if not next_page:
             break
@@ -100,23 +122,41 @@ def _get_storage_timeseries(
 
     all_series: list[dict] = []
     page_params = dict(params)
+    page = 0
     while True:
+        page += 1
+        _log(f"[storage] {project_id}: GET monitoring.googleapis.com timeSeries "
+             f"page {page}")
+        t0 = time.monotonic()
         try:
             resp = session.get(url, params=page_params, headers=headers, timeout=30)
         except Exception as e:
+            _log(f"[storage] {project_id}: monitoring ERROR {type(e).__name__} after "
+                 f"{time.monotonic() - t0:.2f}s")
             return [], f"monitoring: {type(e).__name__}: {e}"
+        elapsed = time.monotonic() - t0
         if resp.status_code == 403:
+            _log(f"[storage] {project_id}: monitoring HTTP 403 in {elapsed:.2f}s")
             return [], "monitoring: permission denied (HTTP 403)"
         if resp.status_code == 404:
+            _log(f"[storage] {project_id}: monitoring HTTP 404 (not enabled) in "
+                 f"{elapsed:.2f}s")
             return [], None  # monitoring not enabled
         if resp.status_code != 200:
+            _log(f"[storage] {project_id}: monitoring HTTP {resp.status_code} in "
+                 f"{elapsed:.2f}s")
             snippet = resp.text[:120].replace("\n", " ")
             return [], f"monitoring: HTTP {resp.status_code} {snippet}"
         try:
             data = resp.json()
         except ValueError as e:
+            _log(f"[storage] {project_id}: monitoring HTTP 200 but invalid JSON in "
+                 f"{elapsed:.2f}s")
             return [], f"monitoring: invalid JSON: {e}"
-        all_series.extend(data.get("timeSeries", []))
+        series = data.get("timeSeries", [])
+        all_series.extend(series)
+        _log(f"[storage] {project_id}: monitoring page {page} returned {len(series)} "
+             f"series in {elapsed:.2f}s (total {len(all_series)})")
         next_page = data.get("nextPageToken")
         if not next_page:
             break
@@ -196,20 +236,26 @@ def get_all_storage(
     project_ids: list[str], max_workers: int = 10
 ) -> dict[str, ProjectStorageResult]:
     """Fetch storage info for multiple projects in parallel."""
+    total = len(project_ids)
+    _log(f"[storage] starting storage queries for {total} project(s) "
+         f"(max_workers={max_workers})")
+    t_start = time.monotonic()
     results: dict[str, ProjectStorageResult] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_project = {
             executor.submit(get_storage_for_project, pid): pid
             for pid in project_ids
         }
+        done = 0
         for future in as_completed(future_to_project):
             pid = future_to_project[future]
             try:
                 results[pid] = future.result()
             except Exception as e:
                 results[pid] = ProjectStorageResult(project=pid, error=str(e))
-                print(
-                    f"Warning: failed to query storage for {pid}: {e}",
-                    file=sys.stderr,
-                )
+                _log(f"Warning: failed to query storage for {pid}: {e}")
+            done += 1
+            _log(f"[storage] progress {done}/{total} (last: {pid})")
+    _log(f"[storage] all storage queries done in "
+         f"{time.monotonic() - t_start:.2f}s")
     return results
