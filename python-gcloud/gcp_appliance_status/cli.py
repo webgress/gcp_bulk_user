@@ -680,6 +680,7 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
     }}
 
     function renderRows() {{
+      updateSortButtons();
       const rows = getFilteredRows();
       rowsEl.innerHTML = "";
 
