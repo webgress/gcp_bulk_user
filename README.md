@@ -18,12 +18,13 @@ Both produce identical output and accept the same CLI flags. They differ only in
 
 ## Required permissions
 
-The identity running this tool needs three IAM bindings. Grant once and use with any implementation:
+The identity running this tool needs the following IAM bindings. Grant once and use with any implementation:
 
 | Role | Scope | Why |
 |---|---|---|
 | `roles/browser` | Organization | List projects in the org via Cloud Resource Manager |
 | `roles/transferappliance.viewer` | Organization (or per-project) | Read Transfer Appliance order status |
+| `roles/monitoring.viewer` | Organization (or per-project) | Read GCS storage usage time series. Optional — only needed for storage data; pass `--no-storage` to skip. |
 | `roles/serviceusage.serviceUsageConsumer` | The **quota project** (see below) | Allow API calls to be billed against that project |
 
 If `roles/transferappliance.viewer` isn't yet available in your environment, fall back to `roles/viewer` on each project being queried.
@@ -36,6 +37,6 @@ Every Google Cloud API call has to be charged against a project for quota and bi
 - When you pass `--projects proj-a proj-b ...` directly, the first project in the list is used as the quota project automatically (override with `--quota-project` if you want).
 - The `python-gcloud` variant inherits the quota project from your `gcloud auth application-default login` session, so the flag is optional there.
 
-> **Note on API cost and quota:** this tool's API usage is trivial — one read call per project against free management APIs (Cloud Resource Manager + Transfer Appliance), returning a few KB per project. A typical run against a 100-project org makes ~100 calls. There is **no billable cost**, and quota concerns only arise if you script this to run on a tight schedule (the default Resource Manager quota is 600 reads/minute). For interactive use you can ignore both.
+> **Note on API cost and quota:** this tool's API usage is trivial — one read call per project against free management APIs (Cloud Resource Manager + Transfer Appliance), plus one Cloud Monitoring read per project for storage usage (skip with `--no-storage`). The Monitoring call uses server-side cross-series aggregation so the response is the same small size whether the project has 1 bucket or 100,000. A typical run against a 100-project org makes ~200 calls. There is **no billable cost**, and quota concerns only arise if you script this to run on a tight schedule (default Resource Manager quota is 600 reads/minute, Monitoring is 6,000 reads/minute). For interactive use you can ignore both.
 
 See each folder's `README.md` for full install and usage instructions.
