@@ -124,6 +124,10 @@ MEMBER="user:you@example.com"
 
 gcloud organizations add-iam-policy-binding $ORG_ID --member="$MEMBER" --role="roles/browser"
 gcloud organizations add-iam-policy-binding $ORG_ID --member="$MEMBER" --role="roles/transferappliance.viewer"
+
+# Optional — only needed if you want per-project storage usage in the report.
+# Pass --no-storage to skip the storage queries and you can omit this role.
+gcloud organizations add-iam-policy-binding $ORG_ID --member="$MEMBER" --role="roles/monitoring.viewer"
 ```
 
 If `roles/transferappliance.viewer` isn't available in your org yet, fall back to `roles/viewer` per project.
@@ -145,15 +149,34 @@ python -m gcp_appliance_status --org-id 123456789 --state-filter ACTIVE SHIPPING
 # JSON or CSV
 python -m gcp_appliance_status --org-id 123456789 --format json
 python -m gcp_appliance_status --org-id 123456789 --format csv > appliances.csv
+
+# Interactive HTML report (Appliances + Projects views, opens in browser)
+python -m gcp_appliance_status --org-id 123456789 --format html
+
+# Skip the GCS storage queries (faster; no Monitoring API access required)
+python -m gcp_appliance_status --org-id 123456789 --no-storage
+
+# Customize the storage history window (default: 45d, max: 395d)
+python -m gcp_appliance_status --org-id 123456789 --storage-history 6w
+python -m gcp_appliance_status --org-id 123456789 --storage-history 2m
 ```
 
 Run `python -m gcp_appliance_status --help` for the full flag list.
 
+### HTML report
+
+`--format html` writes a single-file interactive report with two tabs:
+
+- **Appliances** — the same per-appliance table you get in the terminal, with sortable columns, search, state filter, and Pantheon deep-links.
+- **Projects** — one row per project showing active/inactive status, current GCS storage, peak storage in the lookback window (high watermark), and the dates storage rose from zero / dropped back to zero. Each project ID links into Cloud Monitoring's Metrics Explorer with the `storage/total_bytes` chart pre-loaded for the same window.
+
+A project is **active** when it has at least one not-yet-wiped appliance OR non-zero current storage. The lookback window for storage history is set by `--storage-history` (default 45 days). Storage that's been non-zero for the entire window is shown as "before \<window-start-date\>" — the actual fill date predates what Cloud Monitoring retains.
+
 ## How it works
 
 1. Lists active projects under the org via Cloud Resource Manager.
-2. For each project, queries `transferappliance.googleapis.com` v1.
-3. If the v1 call fails for a project, falls back to `gcloud alpha transfer appliances orders list`.
+2. For each project, queries `transferappliance.googleapis.com` v1 (falls back to `gcloud alpha transfer appliances orders list` on failure).
+3. For each project (unless `--no-storage`), issues one Cloud Monitoring `timeSeries.list` call for the `storage.googleapis.com/storage/total_bytes` metric, aggregated server-side with `crossSeriesReducer=REDUCE_SUM` so a single project-wide daily series comes back regardless of bucket count.
 4. Aggregates and renders.
 
 ## Troubleshooting

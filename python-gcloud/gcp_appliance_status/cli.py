@@ -6,9 +6,10 @@ import argparse
 import csv
 import html
 import json
+import re
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote, urlencode
@@ -20,6 +21,7 @@ from rich.text import Text
 
 from .appliances import get_all_appliances
 from .projects import list_org_projects
+from .storage import LOOKBACK_DAYS, ProjectStorageResult, get_all_storage
 
 DEFAULT_TZ = "America/Los_Angeles"  # PST/PDT, handles DST automatically.
 
@@ -44,6 +46,9 @@ def _project_url(project: str) -> str:
 # Appliance state colors (keys are compared case-insensitively).
 # Real v1alpha1 states seen so far: DRAFT, REQUESTED, PREPARING,
 # SHIPPING_TO_CUSTOMER, ON_SITE, PROCESSING, WIPED, CANCELLED.
+# States that mean the appliance cycle is complete (no longer active).
+INACTIVE_APPLIANCE_STATES = frozenset({"WIPED", "CANCELLED"})
+
 STATE_COLORS = {
     "DRAFT":                "dim",
     "REQUESTED":            "yellow",
@@ -91,7 +96,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write HTML output to this file. If omitted for interactive HTML "
              "output, writes to /tmp/report_<timestamp>.html and opens it.",
     )
+    parser.add_argument(
+        "--no-storage", action="store_true",
+        help="Skip GCS storage queries (faster; omits storage data from output).",
+    )
+    parser.add_argument(
+        "--storage-history", type=_parse_duration_days, default=LOOKBACK_DAYS,
+        metavar="DURATION",
+        help="Storage history window, e.g. 45d, 6w, 2m, 1y. Cloud Monitoring "
+             f"caps daily-aligned samples at ~13 months. Default: {LOOKBACK_DAYS}d.",
+    )
     return parser
+
+
+_DURATION_PATTERN = re.compile(r"^(\d+)([dwmy])$")
+_DURATION_MULTIPLIERS = {"d": 1, "w": 7, "m": 30, "y": 365}
+_MAX_LOOKBACK_DAYS = 395  # ~13 months — Monitoring's daily-aligned retention.
+
+
+def _parse_duration_days(value: str) -> int:
+    m = _DURATION_PATTERN.match(value.strip().lower())
+    if not m:
+        raise argparse.ArgumentTypeError(
+            f"invalid duration {value!r}; expected like 45d, 6w, 2m, 1y"
+        )
+    days = int(m.group(1)) * _DURATION_MULTIPLIERS[m.group(2)]
+    if days < 1:
+        raise argparse.ArgumentTypeError("duration must be at least 1 day")
+    if days > _MAX_LOOKBACK_DAYS:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} exceeds Cloud Monitoring's ~13-month daily retention "
+            f"(max {_MAX_LOOKBACK_DAYS}d)"
+        )
+    return days
 
 
 def _positive_int(value: str) -> int:
@@ -127,6 +164,52 @@ def _safe_csv_cell(value: object) -> str:
 
 def _dedupe_project_ids(project_ids: list[str]) -> list[str]:
     return list(dict.fromkeys(project_ids))
+
+
+def _build_project_summaries(
+    all_appliances: list[dict],
+    storage_results: dict[str, ProjectStorageResult],
+    project_ids: list[str],
+) -> dict:
+    """Return a per-project summary dict keyed by project ID.
+
+    Status is "active" when at least one appliance is not yet wiped/cancelled
+    OR when the project has non-zero current storage.
+    """
+    by_project: dict[str, list[dict]] = {}
+    for a in all_appliances:
+        by_project.setdefault(a["project"], []).append(a)
+
+    summaries: dict = {}
+    for pid in project_ids:
+        project_appliances = by_project.get(pid, [])
+        storage = storage_results.get(pid)
+
+        has_active_appliance = any(
+            a["state"].upper() not in INACTIVE_APPLIANCE_STATES
+            for a in project_appliances
+        )
+        has_storage = storage is not None and storage.current_bytes > 0
+        is_active = has_active_appliance or has_storage
+
+        storage_dict = None
+        if storage is not None:
+            storage_dict = {
+                "current_bytes": storage.current_bytes,
+                "high_watermark_bytes": storage.high_watermark_bytes,
+                "fill_date": storage.fill_date,
+                "empty_date": storage.empty_date,
+                "error": storage.error,
+            }
+
+        summaries[pid] = {
+            "status": "active" if is_active else "inactive",
+            "appliance_count": len(project_appliances),
+            "appliance_states": sorted({a["state"] for a in project_appliances}),
+            "storage": storage_dict,
+        }
+
+    return summaries
 
 
 def _attach_links(appliances: list[dict]) -> list[dict]:
@@ -209,8 +292,24 @@ def render_csv(appliances: list[dict]) -> None:
         ])
 
 
-def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
-    report_json = json.dumps(appliances, indent=2).replace("</", "<\\/")
+def build_html_report(
+    appliances: list[dict],
+    project_summaries: dict,
+    org_id: str,
+    tz_name: str,
+    lookback_days: int = LOOKBACK_DAYS,
+) -> str:
+    now_utc = datetime.now(timezone.utc)
+    storage_window_start = (now_utc - timedelta(days=lookback_days)).isoformat()
+    storage_window_end = now_utc.isoformat()
+    report_data = {
+        "appliances": appliances,
+        "projects": project_summaries,
+        "storage_window_start": storage_window_start,
+        "storage_window_end": storage_window_end,
+        "storage_window_days": lookback_days,
+    }
+    report_json = json.dumps(report_data, indent=2).replace("</", "<\\/")
     generated_at = datetime.now().astimezone().isoformat(timespec="seconds")
     title = "Transfer Appliance Report"
     heading = f"{title} — org {html.escape(org_id)}"
@@ -479,11 +578,81 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
       font-size: 0.92rem;
     }}
 
+    [hidden] {{ display: none !important; }}
+
+    .view-tabs {{
+      display: flex;
+      gap: 6px;
+      margin: 14px 0 0;
+    }}
+
+    .tab-btn {{
+      all: unset;
+      cursor: pointer;
+      padding: 8px 20px;
+      border-radius: 10px;
+      font: 600 0.82rem/1.2 ui-monospace, "SFMono-Regular", Menlo, monospace;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      border: 1px solid transparent;
+      transition: background 0.15s, color 0.15s;
+      box-sizing: border-box;
+    }}
+
+    .tab-btn[aria-selected="true"] {{
+      background: var(--panel);
+      border-color: var(--panel-border);
+      color: var(--accent-strong);
+      box-shadow: var(--shadow);
+    }}
+
+    .tab-btn:hover:not([aria-selected="true"]) {{
+      background: rgba(255, 252, 245, 0.5);
+    }}
+
+    .status-filter-bar {{
+      display: flex;
+      gap: 8px;
+      margin-top: 14px;
+      flex-wrap: wrap;
+    }}
+
+    .status-filter-btn {{
+      all: unset;
+      cursor: pointer;
+      padding: 8px 18px;
+      border-radius: 10px;
+      font: 600 0.78rem/1.2 ui-monospace, "SFMono-Regular", Menlo, monospace;
+      letter-spacing: 0.07em;
+      border: 1px solid var(--panel-border);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      color: var(--muted);
+      transition: opacity 0.15s, background 0.15s;
+      box-sizing: border-box;
+    }}
+
+    .status-filter-btn[aria-pressed="true"] {{
+      color: var(--accent-strong);
+    }}
+
+    .status-filter-btn[aria-pressed="false"] {{
+      opacity: 0.55;
+      background: rgba(228, 220, 205, 0.55);
+      box-shadow: none;
+    }}
+
     @media (max-width: 820px) {{
-      th:nth-child(5),
-      th:nth-child(6),
-      td:nth-child(5),
-      td:nth-child(6) {{
+      #view-appliances th:nth-child(5),
+      #view-appliances th:nth-child(6),
+      #view-appliances td:nth-child(5),
+      #view-appliances td:nth-child(6) {{
+        display: none;
+      }}
+      #view-projects th:nth-child(4),
+      #view-projects th:nth-child(5),
+      #view-projects td:nth-child(4),
+      #view-projects td:nth-child(5) {{
         display: none;
       }}
     }}
@@ -496,43 +665,93 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
       <div class="totals" id="totals"></div>
     </section>
 
-    <section class="summary summary-states" id="summary-states"></section>
+    <div class="view-tabs" role="tablist">
+      <button class="tab-btn" role="tab" aria-selected="true"
+              data-view="appliances" id="tab-appliances">Appliances</button>
+      <button class="tab-btn" role="tab" aria-selected="false"
+              data-view="projects" id="tab-projects">Projects</button>
+    </div>
 
-    <section class="toolbar">
-      <div class="field">
-        <label for="search">Search</label>
-        <input id="search" type="search" placeholder="Project, appliance ID, model, state">
-      </div>
-      <div class="field">
-        <label for="project-filter">Project</label>
-        <select id="project-filter">
-          <option value="">All projects</option>
-        </select>
-      </div>
-    </section>
+    <!-- Appliances view -->
+    <div id="view-appliances" role="tabpanel">
+      <section class="summary summary-states" id="summary-states"></section>
 
-    <section class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th><button data-sort="project">Project</button></th>
-            <th><button data-sort="appliance_id">Appliance ID</button></th>
-            <th><button data-sort="model">Model</button></th>
-            <th><button data-sort="state">State</button></th>
-            <th><button data-sort="create_time">Created</button></th>
-            <th><button data-sort="update_time">Updated</button></th>
-          </tr>
-        </thead>
-        <tbody id="rows"></tbody>
-      </table>
-    </section>
+      <section class="toolbar">
+        <div class="field">
+          <label for="search">Search</label>
+          <input id="search" type="search" placeholder="Project, appliance ID, model, state">
+        </div>
+        <div class="field">
+          <label for="project-filter">Project</label>
+          <select id="project-filter">
+            <option value="">All projects</option>
+          </select>
+        </div>
+      </section>
+
+      <section class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th><button data-sort="project">Project</button></th>
+              <th><button data-sort="appliance_id">Appliance ID</button></th>
+              <th><button data-sort="model">Model</button></th>
+              <th><button data-sort="state">State</button></th>
+              <th><button data-sort="create_time">Created</button></th>
+              <th><button data-sort="update_time">Updated</button></th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </section>
+    </div>
+
+    <!-- Projects view -->
+    <div id="view-projects" role="tabpanel" hidden>
+      <div class="status-filter-bar" id="status-filter-bar">
+        <button class="status-filter-btn" data-status="active"
+                aria-pressed="true">Active</button>
+        <button class="status-filter-btn" data-status="inactive"
+                aria-pressed="true">Inactive</button>
+      </div>
+
+      <section class="toolbar">
+        <div class="field">
+          <label for="proj-search">Search</label>
+          <input id="proj-search" type="search" placeholder="Project name">
+        </div>
+      </section>
+
+      <section class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th><button data-proj-sort="project">Project</button></th>
+              <th><button data-proj-sort="status">Status</button></th>
+              <th>Appliances</th>
+              <th><button data-proj-sort="current_bytes">Storage Now</button></th>
+              <th><button data-proj-sort="high_watermark_bytes">High Watermark</button></th>
+              <th><button data-proj-sort="fill_date">Fill Date</button></th>
+              <th><button data-proj-sort="empty_date">Empty Date</button></th>
+            </tr>
+          </thead>
+          <tbody id="proj-rows"></tbody>
+        </table>
+      </section>
+    </div>
 
     <div class="footer" id="footer"></div>
   </main>
 
   <script id="report-data" type="application/json">{report_json}</script>
   <script>
-    const appliances = JSON.parse(document.getElementById("report-data").textContent);
+    const reportData = JSON.parse(document.getElementById("report-data").textContent);
+    const appliances = reportData.appliances || [];
+    const projectSummaries = reportData.projects || {{}};
+    const storageWindowStart = reportData.storage_window_start || null;
+    const storageWindowEnd = reportData.storage_window_end || null;
+    const storageWindowDays = reportData.storage_window_days || 0;
+
     const rowsEl = document.getElementById("rows");
     const totalsEl = document.getElementById("totals");
     const summaryStatesEl = document.getElementById("summary-states");
@@ -568,26 +787,11 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
     let sortKey = "update_time";
     let sortDir = "desc";
 
-    function countBy(key) {{
-      const counts = new Map();
-      for (const row of appliances) {{
-        counts.set(row[key], (counts.get(row[key]) || 0) + 1);
-      }}
-      return counts;
+    function escapeHtml(s) {{
+      return String(s ?? "")
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
     }}
-
-    const projectCounts = countBy("project");
-
-    const projects = Array.from(projectCounts.keys()).sort();
-    projectFilterEl.options[0].textContent = `All projects (${{appliances.length}})`;
-    for (const project of projects) {{
-      const option = document.createElement("option");
-      option.value = project;
-      option.textContent = `${{project}}: ${{projectCounts.get(project)}}`;
-      projectFilterEl.appendChild(option);
-    }}
-
-    const excludedStates = new Set();
 
     function formatTime(value) {{
       if (!value || value === "N/A") return value || "N/A";
@@ -600,6 +804,15 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
       }}).format(date);
     }}
 
+    function formatBytes(bytes) {{
+      if (bytes === null || bytes === undefined) return "—";
+      if (bytes === 0) return "0 B";
+      const k = 1024;
+      const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+      const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), units.length - 1);
+      return (bytes / Math.pow(k, i)).toFixed(1) + " " + units[i];
+    }}
+
     function compareValues(left, right) {{
       const a = (left ?? "").toString().toLowerCase();
       const b = (right ?? "").toString().toLowerCase();
@@ -607,6 +820,31 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
       if (a > b) return 1;
       return 0;
     }}
+
+    // ── Appliances view ────────────────────────────────────────────────────
+
+    function countBy(key) {{
+      const counts = new Map();
+      for (const row of appliances) {{
+        counts.set(row[key], (counts.get(row[key]) || 0) + 1);
+      }}
+      return counts;
+    }}
+
+    const projectCounts = countBy("project");
+    const projectIds = Array.from(projectCounts.keys()).sort();
+
+    projectFilterEl.options[0].textContent = `All projects (${{appliances.length}})`;
+    for (const project of projectIds) {{
+      const option = document.createElement("option");
+      option.value = project;
+      const status = projectSummaries[project]?.status ?? "";
+      const statusTag = status ? ` [${{status}}]` : "";
+      option.textContent = `${{project}}${{statusTag}}: ${{projectCounts.get(project)}}`;
+      projectFilterEl.appendChild(option);
+    }}
+
+    const excludedStates = new Set();
 
     function applyTextFilters(rows) {{
       const query = searchEl.value.trim().toLowerCase();
@@ -731,6 +969,226 @@ def build_html_report(appliances: list[dict], org_id: str, tz_name: str) -> str:
       button.dataset.label = button.textContent;
     }}
 
+    // ── Projects view ──────────────────────────────────────────────────────
+
+    const projStatusFilter = new Set(["active", "inactive"]);
+    let projSortKey = "project";
+    let projSortDir = "asc";
+
+    const projSearchEl = document.getElementById("proj-search");
+    const projRowsEl = document.getElementById("proj-rows");
+    const projSortButtons = Array.from(document.querySelectorAll("[data-proj-sort]"));
+
+    function projUrl(projectId) {{
+      // Deep-link into Metrics Explorer pre-filled with the same metric the
+      // report aggregates: storage/total_bytes summed across the project.
+      const pageState = {{
+        xyChart: {{
+          dataSets: [{{
+            timeSeriesFilter: {{
+              filter: 'metric.type="storage.googleapis.com/storage/total_bytes" resource.type="gcs_bucket"',
+              minAlignmentPeriod: "86400s",
+              perSeriesAligner: "ALIGN_MAX",
+              crossSeriesReducer: "REDUCE_SUM",
+            }},
+            plotType: "LINE",
+          }}],
+        }},
+      }};
+      const params = new URLSearchParams();
+      params.set("project", projectId);
+      params.set("pageState", JSON.stringify(pageState));
+      // Absolute time window — matches the report's storage history exactly.
+      // Date-only format (YYYY-MM-DD) is what the Metrics Explorer URL
+      // accepts; hours/seconds don't matter for this view.
+      if (storageWindowStart) params.set("startTime", storageWindowStart.substring(0, 10));
+      if (storageWindowEnd) params.set("endTime", storageWindowEnd.substring(0, 10));
+      return `https://pantheon.corp.google.com/monitoring/metrics-explorer?${{params.toString()}}`;
+    }}
+
+    function getFilteredProjects() {{
+      const q = projSearchEl.value.trim().toLowerCase();
+      return Object.entries(projectSummaries)
+        .filter(([id, proj]) => {{
+          if (!projStatusFilter.has(proj.status)) return false;
+          if (q) return id.toLowerCase().includes(q);
+          return true;
+        }})
+        .sort(([idA, a], [idB, b]) => {{
+          let av, bv;
+          switch (projSortKey) {{
+            case "project":             av = idA;   bv = idB;   break;
+            case "status":              av = a.status;  bv = b.status;  break;
+            case "current_bytes":
+              av = a.storage?.current_bytes ?? -1;
+              bv = b.storage?.current_bytes ?? -1;
+              break;
+            case "high_watermark_bytes":
+              av = a.storage?.high_watermark_bytes ?? -1;
+              bv = b.storage?.high_watermark_bytes ?? -1;
+              break;
+            case "fill_date":
+              av = a.storage?.fill_date ?? "";
+              bv = b.storage?.fill_date ?? "";
+              break;
+            case "empty_date":
+              av = a.storage?.empty_date ?? "";
+              bv = b.storage?.empty_date ?? "";
+              break;
+            default: av = idA; bv = idB;
+          }}
+          const cmp = typeof av === "number"
+            ? av - bv
+            : String(av ?? "").toLowerCase().localeCompare(String(bv ?? "").toLowerCase());
+          return projSortDir === "asc" ? cmp : -cmp;
+        }});
+    }}
+
+    function renderProjectRows() {{
+      updateProjSortButtons();
+      const rows = getFilteredProjects();
+      projRowsEl.innerHTML = "";
+
+      for (const [id, proj] of rows) {{
+        const tr = document.createElement("tr");
+        const storage = proj.storage || {{}};
+        const isActive = proj.status === "active";
+        const statusColor = isActive ? "#0b6e4f" : "#6e6357";
+
+        const statesList = (proj.appliance_states || []).join(", ") || "—";
+        const applianceText = proj.appliance_count > 0
+          ? `${{proj.appliance_count}} · ${{statesList}}`
+          : "0";
+
+        const storErr = storage.error
+          ? ` <span title="${{escapeHtml(storage.error)}}" style="cursor:help">⚠</span>`
+          : "";
+        const storNow = storage.current_bytes != null
+          ? formatBytes(storage.current_bytes) + storErr
+          : "—";
+        const storHWM = storage.high_watermark_bytes
+          ? formatBytes(storage.high_watermark_bytes)
+          : "—";
+        let fillStr;
+        if (storage.fill_date) {{
+          fillStr = formatTime(storage.fill_date);
+        }} else if ((storage.high_watermark_bytes || 0) > 0 || (storage.current_bytes || 0) > 0) {{
+          // Data was already present at the start of the monitoring window —
+          // we can't tell exactly when it rose, so anchor to the lookback edge.
+          const tip = `Storage was already non-zero ${{storageWindowDays}} days ago; ` +
+                      `actual fill date is unknown.`;
+          const anchor = storageWindowStart ? formatTime(storageWindowStart) : "the lookback window";
+          fillStr = `<em title="${{escapeHtml(tip)}}" style="color:var(--muted);cursor:help">before ${{anchor}}</em>`;
+        }} else {{
+          fillStr = "—";
+        }}
+        let emptyStr;
+        if (storage.empty_date) {{
+          emptyStr = formatTime(storage.empty_date);
+        }} else if (storage.current_bytes > 0) {{
+          emptyStr = `<em style="color:var(--accent)">still active</em>`;
+        }} else {{
+          emptyStr = "—";
+        }}
+
+        tr.innerHTML = `
+          <td class="mono"><a href="${{projUrl(id)}}" target="_blank" rel="noopener noreferrer">${{escapeHtml(id)}}</a></td>
+          <td><span class="state" style="color:${{statusColor}}">${{proj.status}}</span></td>
+          <td class="mono" style="font-size:0.85rem">${{applianceText}}</td>
+          <td class="mono">${{storNow}}</td>
+          <td class="mono">${{storHWM}}</td>
+          <td>${{fillStr}}</td>
+          <td>${{emptyStr}}</td>
+        `;
+        projRowsEl.appendChild(tr);
+      }}
+
+      // Update active/inactive filter button labels
+      const allProjIds = Object.keys(projectSummaries);
+      const activeCnt   = allProjIds.filter(i => projectSummaries[i].status === "active").length;
+      const inactiveCnt = allProjIds.length - activeCnt;
+      document.querySelector('[data-status="active"]').textContent   = `Active (${{activeCnt}})`;
+      document.querySelector('[data-status="inactive"]').textContent = `Inactive (${{inactiveCnt}})`;
+
+      // Update totals bar
+      totalsEl.innerHTML =
+        `Total Projects: <strong>${{allProjIds.length}}</strong>` +
+        `<span class="sep">·</span>` +
+        `<strong>${{rows.length}}</strong> visible` +
+        `<span class="sep">·</span>` +
+        `<strong>${{activeCnt}}</strong> active, <strong>${{inactiveCnt}}</strong> inactive`;
+
+      footerEl.textContent = `${{rows.length}} project(s) shown · Generated {html.escape(generated_at)} ({html.escape(tz_name)})`;
+    }}
+
+    function updateProjSortButtons() {{
+      for (const btn of projSortButtons) {{
+        const active = btn.dataset.projSort === projSortKey;
+        btn.dataset.active = active ? "true" : "false";
+        const suffix = active ? (projSortDir === "asc" ? " ↑" : " ↓") : " ↕";
+        btn.textContent = (btn.dataset.projLabel ?? btn.textContent.replace(/ [↑↓↕]$/, "")) + suffix;
+        if (!btn.dataset.projLabel) btn.dataset.projLabel = btn.textContent.replace(/ [↑↓↕]$/, "");
+      }}
+    }}
+
+    for (const btn of projSortButtons) {{
+      btn.addEventListener("click", () => {{
+        const nextKey = btn.dataset.projSort;
+        if (projSortKey === nextKey) {{
+          projSortDir = projSortDir === "asc" ? "desc" : "asc";
+        }} else {{
+          projSortKey = nextKey;
+          projSortDir = "asc";
+        }}
+        renderProjectRows();
+      }});
+    }}
+
+    for (const btn of document.querySelectorAll(".status-filter-btn")) {{
+      btn.addEventListener("click", () => {{
+        const status = btn.dataset.status;
+        if (projStatusFilter.has(status)) {{
+          if (projStatusFilter.size > 1) {{
+            projStatusFilter.delete(status);
+            btn.setAttribute("aria-pressed", "false");
+          }}
+        }} else {{
+          projStatusFilter.add(status);
+          btn.setAttribute("aria-pressed", "true");
+        }}
+        renderProjectRows();
+      }});
+    }}
+
+    projSearchEl.addEventListener("input", renderProjectRows);
+
+    // ── Tab switching ──────────────────────────────────────────────────────
+
+    const viewAppliances = document.getElementById("view-appliances");
+    const viewProjects   = document.getElementById("view-projects");
+    const tabBtns = Array.from(document.querySelectorAll(".tab-btn"));
+
+    function switchTab(view) {{
+      for (const btn of tabBtns) {{
+        btn.setAttribute("aria-selected", btn.dataset.view === view ? "true" : "false");
+      }}
+      if (view === "appliances") {{
+        viewAppliances.removeAttribute("hidden");
+        viewProjects.setAttribute("hidden", "");
+        renderRows();
+      }} else {{
+        viewAppliances.setAttribute("hidden", "");
+        viewProjects.removeAttribute("hidden");
+        renderProjectRows();
+      }}
+    }}
+
+    for (const btn of tabBtns) {{
+      btn.addEventListener("click", () => switchTab(btn.dataset.view));
+    }}
+
+    // ── Initial render ─────────────────────────────────────────────────────
+
     updateSortButtons();
     renderRows();
   </script>
@@ -749,9 +1207,12 @@ def _write_html_report(path: Path, document: str) -> None:
     path.write_text(document, encoding="utf-8")
 
 
-def render_html(appliances: list[dict], org_id: str, tz_name: str,
-                html_file: Optional[str]) -> None:
-    document = build_html_report(appliances, org_id, tz_name)
+def render_html(appliances: list[dict], project_summaries: dict,
+                org_id: str, tz_name: str, html_file: Optional[str],
+                lookback_days: int = LOOKBACK_DAYS) -> None:
+    document = build_html_report(
+        appliances, project_summaries, org_id, tz_name, lookback_days,
+    )
     if html_file:
         path = Path(html_file).expanduser()
         _write_html_report(path, document)
@@ -809,6 +1270,27 @@ def main() -> None:
     except Exception as e:
         _log(f"Failed to query Transfer Appliance status: {type(e).__name__}: {e}")
         sys.exit(2)
+
+    # Fetch GCS storage usage (unless --no-storage)
+    if args.no_storage:
+        storage_results: dict = {}
+    else:
+        _log(f"Querying GCS storage usage ({args.storage_history}d lookback)...")
+        try:
+            storage_results = get_all_storage(
+                project_ids,
+                max_workers=args.workers,
+                lookback_days=args.storage_history,
+            )
+        except Exception as e:
+            _log(f"Warning: storage query failed: {type(e).__name__}: {e}")
+            storage_results = {}
+
+    # Build per-project summaries (using unfiltered appliances for status).
+    project_summaries = _build_project_summaries(
+        scan_results.appliances, storage_results, project_ids
+    )
+
     appliances = scan_results.appliances
 
     # Apply state filter
@@ -838,11 +1320,13 @@ def main() -> None:
 
     # Output
     if args.output_format == "json":
-        print(json.dumps(appliances, indent=2))
+        output = {"appliances": appliances, "projects": project_summaries}
+        print(json.dumps(output, indent=2))
     elif args.output_format == "csv":
         render_csv(appliances)
     elif args.output_format == "html":
-        render_html(appliances, args.org_id, args.timezone, args.html_file)
+        render_html(appliances, project_summaries, args.org_id, args.timezone,
+                    args.html_file, lookback_days=args.storage_history)
     else:
         render_table(appliances, tz)
 
