@@ -890,5 +890,29 @@ class StorageApiTests(unittest.TestCase):
         self.assertEqual(result.empty_date, "2026-04-03T00:00:00Z")
 
 
+class StorageHistoryDurationTests(unittest.TestCase):
+    """Parse --storage-history values like 45d / 6w / 2m / 1y."""
+
+    def test_days_weeks_months_years(self) -> None:
+        self.assertEqual(cli._parse_duration_days("45d"), 45)
+        self.assertEqual(cli._parse_duration_days("6w"), 42)
+        self.assertEqual(cli._parse_duration_days("2m"), 60)
+        self.assertEqual(cli._parse_duration_days("1y"), 365)
+
+    def test_uppercase_and_whitespace_normalized(self) -> None:
+        self.assertEqual(cli._parse_duration_days("  6W "), 42)
+
+    def test_invalid_format_rejected(self) -> None:
+        import argparse
+        for bad in ["45", "1.5d", "weeks", "5h", "-3d", "0d"]:
+            with self.assertRaises(argparse.ArgumentTypeError):
+                cli._parse_duration_days(bad)
+
+    def test_over_thirteen_months_rejected(self) -> None:
+        import argparse
+        with self.assertRaises(argparse.ArgumentTypeError):
+            cli._parse_duration_days("2y")  # 730d > 395d cap
+
+
 if __name__ == "__main__":
     unittest.main()

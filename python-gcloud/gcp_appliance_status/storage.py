@@ -51,7 +51,10 @@ def _make_session() -> tuple[AuthorizedSession, dict]:
 
 
 def _get_project_storage_series(
-    project_id: str, session: AuthorizedSession, headers: dict
+    project_id: str,
+    session: AuthorizedSession,
+    headers: dict,
+    lookback_days: int,
 ) -> tuple[list[tuple[str, int]], Optional[str]]:
     """Return (sorted [(iso_timestamp, total_bytes)], error).
 
@@ -59,7 +62,7 @@ def _get_project_storage_series(
     so the server returns one series for the whole project.
     """
     end_time = datetime.now(timezone.utc)
-    start_time = end_time - timedelta(days=LOOKBACK_DAYS)
+    start_time = end_time - timedelta(days=lookback_days)
     params: dict = {
         "filter": 'metric.type="storage.googleapis.com/storage/total_bytes"',
         "interval.startTime": start_time.isoformat(),
@@ -122,7 +125,9 @@ def _get_project_storage_series(
     return points, None
 
 
-def get_storage_for_project(project_id: str) -> ProjectStorageResult:
+def get_storage_for_project(
+    project_id: str, lookback_days: int = LOOKBACK_DAYS
+) -> ProjectStorageResult:
     try:
         session, headers = _make_session()
     except Exception as e:
@@ -130,7 +135,9 @@ def get_storage_for_project(project_id: str) -> ProjectStorageResult:
             project=project_id, error=f"auth: {type(e).__name__}: {e}"
         )
 
-    points, err = _get_project_storage_series(project_id, session, headers)
+    points, err = _get_project_storage_series(
+        project_id, session, headers, lookback_days
+    )
     if not points:
         return ProjectStorageResult(project=project_id, error=err)
 
@@ -175,17 +182,19 @@ def get_storage_for_project(project_id: str) -> ProjectStorageResult:
 
 
 def get_all_storage(
-    project_ids: list[str], max_workers: int = 10
+    project_ids: list[str],
+    max_workers: int = 10,
+    lookback_days: int = LOOKBACK_DAYS,
 ) -> dict[str, ProjectStorageResult]:
     """Fetch storage info for multiple projects in parallel."""
     total = len(project_ids)
     _log(f"[storage] starting storage queries for {total} project(s) "
-         f"(max_workers={max_workers})")
+         f"(max_workers={max_workers}, lookback_days={lookback_days})")
     t_start = time.monotonic()
     results: dict[str, ProjectStorageResult] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_project = {
-            executor.submit(get_storage_for_project, pid): pid
+            executor.submit(get_storage_for_project, pid, lookback_days): pid
             for pid in project_ids
         }
         done = 0

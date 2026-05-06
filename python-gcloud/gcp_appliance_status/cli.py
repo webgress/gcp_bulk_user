@@ -6,6 +6,7 @@ import argparse
 import csv
 import html
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -99,7 +100,35 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-storage", action="store_true",
         help="Skip GCS storage queries (faster; omits storage data from output).",
     )
+    parser.add_argument(
+        "--storage-history", type=_parse_duration_days, default=LOOKBACK_DAYS,
+        metavar="DURATION",
+        help="Storage history window, e.g. 45d, 6w, 2m, 1y. Cloud Monitoring "
+             f"caps daily-aligned samples at ~13 months. Default: {LOOKBACK_DAYS}d.",
+    )
     return parser
+
+
+_DURATION_PATTERN = re.compile(r"^(\d+)([dwmy])$")
+_DURATION_MULTIPLIERS = {"d": 1, "w": 7, "m": 30, "y": 365}
+_MAX_LOOKBACK_DAYS = 395  # ~13 months — Monitoring's daily-aligned retention.
+
+
+def _parse_duration_days(value: str) -> int:
+    m = _DURATION_PATTERN.match(value.strip().lower())
+    if not m:
+        raise argparse.ArgumentTypeError(
+            f"invalid duration {value!r}; expected like 45d, 6w, 2m, 1y"
+        )
+    days = int(m.group(1)) * _DURATION_MULTIPLIERS[m.group(2)]
+    if days < 1:
+        raise argparse.ArgumentTypeError("duration must be at least 1 day")
+    if days > _MAX_LOOKBACK_DAYS:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} exceeds Cloud Monitoring's ~13-month daily retention "
+            f"(max {_MAX_LOOKBACK_DAYS}d)"
+        )
+    return days
 
 
 def _positive_int(value: str) -> int:
@@ -268,15 +297,17 @@ def build_html_report(
     project_summaries: dict,
     org_id: str,
     tz_name: str,
+    lookback_days: int = LOOKBACK_DAYS,
 ) -> str:
-    storage_window_start = (
-        datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
-    ).isoformat()
+    now_utc = datetime.now(timezone.utc)
+    storage_window_start = (now_utc - timedelta(days=lookback_days)).isoformat()
+    storage_window_end = now_utc.isoformat()
     report_data = {
         "appliances": appliances,
         "projects": project_summaries,
         "storage_window_start": storage_window_start,
-        "storage_window_days": LOOKBACK_DAYS,
+        "storage_window_end": storage_window_end,
+        "storage_window_days": lookback_days,
     }
     report_json = json.dumps(report_data, indent=2).replace("</", "<\\/")
     generated_at = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -718,6 +749,7 @@ def build_html_report(
     const appliances = reportData.appliances || [];
     const projectSummaries = reportData.projects || {{}};
     const storageWindowStart = reportData.storage_window_start || null;
+    const storageWindowEnd = reportData.storage_window_end || null;
     const storageWindowDays = reportData.storage_window_days || 0;
 
     const rowsEl = document.getElementById("rows");
@@ -962,10 +994,16 @@ def build_html_report(
             plotType: "LINE",
           }}],
         }},
-        timeSelection: {{ timeRange: "6w" }},
       }};
-      const encoded = encodeURIComponent(JSON.stringify(pageState));
-      return `https://pantheon.corp.google.com/monitoring/metrics-explorer?project=${{encodeURIComponent(projectId)}}&pageState=${{encoded}}`;
+      const params = new URLSearchParams();
+      params.set("project", projectId);
+      params.set("pageState", JSON.stringify(pageState));
+      // Absolute time window — matches the report's storage history exactly.
+      // Date-only format (YYYY-MM-DD) is what the Metrics Explorer URL
+      // accepts; hours/seconds don't matter for this view.
+      if (storageWindowStart) params.set("startTime", storageWindowStart.substring(0, 10));
+      if (storageWindowEnd) params.set("endTime", storageWindowEnd.substring(0, 10));
+      return `https://pantheon.corp.google.com/monitoring/metrics-explorer?${{params.toString()}}`;
     }}
 
     function getFilteredProjects() {{
@@ -1170,8 +1208,11 @@ def _write_html_report(path: Path, document: str) -> None:
 
 
 def render_html(appliances: list[dict], project_summaries: dict,
-                org_id: str, tz_name: str, html_file: Optional[str]) -> None:
-    document = build_html_report(appliances, project_summaries, org_id, tz_name)
+                org_id: str, tz_name: str, html_file: Optional[str],
+                lookback_days: int = LOOKBACK_DAYS) -> None:
+    document = build_html_report(
+        appliances, project_summaries, org_id, tz_name, lookback_days,
+    )
     if html_file:
         path = Path(html_file).expanduser()
         _write_html_report(path, document)
@@ -1234,9 +1275,13 @@ def main() -> None:
     if args.no_storage:
         storage_results: dict = {}
     else:
-        _log("Querying GCS storage usage...")
+        _log(f"Querying GCS storage usage ({args.storage_history}d lookback)...")
         try:
-            storage_results = get_all_storage(project_ids, max_workers=args.workers)
+            storage_results = get_all_storage(
+                project_ids,
+                max_workers=args.workers,
+                lookback_days=args.storage_history,
+            )
         except Exception as e:
             _log(f"Warning: storage query failed: {type(e).__name__}: {e}")
             storage_results = {}
@@ -1281,7 +1326,7 @@ def main() -> None:
         render_csv(appliances)
     elif args.output_format == "html":
         render_html(appliances, project_summaries, args.org_id, args.timezone,
-                    args.html_file)
+                    args.html_file, lookback_days=args.storage_history)
     else:
         render_table(appliances, tz)
 
